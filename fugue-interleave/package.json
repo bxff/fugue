@@ -1,0 +1,13 @@
+{
+    "name": "fugue-interleave",
+    "version": "1.0.0",
+    "description": "Fugue interleave test",
+    "main": "index.js",
+    "type": "module",
+    "dependencies": {
+        "@collabs/collabs": "0.13.4",
+        "seedrandom": "^3.0.5",
+        "fugue": "file:../fugue",
+        "fugue-max-simple": "file:../fugue-max-simple"
+    }
+}

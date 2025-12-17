@@ -56,6 +56,10 @@ class FugueCRDT {
     this.doc.transact(() => this.carray.insert(index, ...elems));
   }
 
+  deleteArray(index, count) {
+    this.doc.transact(() => this.carray.delete(index, count));
+  }
+
   getArray() {
     return this.carray.slice();
   }
@@ -107,6 +111,10 @@ class FugueMaxSimpleCRDT {
 
   insertArray(index, elems) {
     this.doc.transact(() => this.carray.insert(index, ...elems));
+  }
+
+  deleteArray(index, count) {
+    this.doc.transact(() => this.carray.delete(index, count));
   }
 
   getArray() {
@@ -235,8 +243,67 @@ async function runFigure7(name, factory) {
 }
 
 
-async function runABCDWaitZ(name, factory) {
+async function runABCD_Deletion(name, factory) {
   console.log(`\n--- Running ABCD with Z (and X, Y) scenario for ${name} ---`);
+  // Replicas with deterministic IDs for A < B < C < D
+  let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
+  const doc1 = factory.create(u => updates1.push(u), "0"); // R1
+  const doc2 = factory.create(u => updates2.push(u), "1"); // R2
+  const doc3 = factory.create(u => updates3.push(u), "2"); // R3
+  const doc4 = factory.create(u => updates4.push(u), "3"); // R4
+
+  // 1. Concurrent inserts A, B, C, D
+  doc1.insertArray(0, ['A']);
+  doc2.insertArray(0, ['B']);
+  doc3.insertArray(0, ['C']);
+  doc4.insertArray(0, ['D']);
+
+  // Extract initial updates for A, B, C, D
+  const a_update = updates1.shift();
+  const b_update = updates2.shift();
+  const c_update = updates3.shift();
+  const d_update = updates4.shift();
+
+  // 2. R2 (B) deletes B.
+  doc2.deleteArray(0, 1);
+  const b_delete_update = updates2.shift();
+  console.log(`R2 deleted B. State: ${doc2.getArray().join('')}`);
+
+  // 3. R3 (C) receives A from R1. Inserts X between A and C.
+  doc3.applyUpdate(a_update);
+  console.log(`R3 state after receiving A: ${doc3.getArray().join('')}`); // Expect "AC"
+  doc3.insertArray(1, ['X']);
+  console.log(`R3 inserted X. State: ${doc3.getArray().join('')}`); // Expect "AXC"
+  const x_update = updates3.shift();
+
+  // 4. R4 (D) receives A from R1. Inserts Z between A and D.
+  doc4.applyUpdate(a_update);
+  console.log(`R4 state after receiving A: ${doc4.getArray().join('')}`); // Expect "AD"
+  doc4.insertArray(1, ['Z']);
+  console.log(`R4 inserted Z. State: ${doc4.getArray().join('')}`); // Expect "AZD"
+  const z_update = updates4.shift();
+
+  // 5. R1 (A) inserts Y after A (stays "AY" as it doesn't see X or C yet)
+  doc1.insertArray(1, ['Y']);
+  console.log(`R1 inserted Y. State: ${doc1.getArray().join('')}`); // Expect "AY"
+  const y_update = updates1.shift();
+
+  // 6. Merge all
+  const finalDoc = factory.create(null, "final");
+  finalDoc.applyUpdate(a_update);
+  finalDoc.applyUpdate(b_update);
+  finalDoc.applyUpdate(c_update);
+  finalDoc.applyUpdate(d_update);
+  finalDoc.applyUpdate(b_delete_update);
+  finalDoc.applyUpdate(x_update);
+  finalDoc.applyUpdate(z_update);
+  finalDoc.applyUpdate(y_update);
+  const result = finalDoc.getArray().join('');
+  console.log(`Final Result for ${name}: "${result}"`);
+}
+
+async function runABCD_Interleaving(name, factory) {
+  console.log(`\n--- Running ABCD Interleaving (Original) scenario for ${name} ---`);
   // Replicas with deterministic IDs for A < B < C < D
   let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
   const doc1 = factory.create(u => updates1.push(u), "0"); // A
@@ -250,69 +317,36 @@ async function runABCDWaitZ(name, factory) {
   doc3.insertArray(0, ['C']);
   doc4.insertArray(0, ['D']);
 
-  // Check Base Order
-  const tempDoc = factory.create(null, "temp");
-  updates1.forEach(u => tempDoc.applyUpdate(u));
-  updates2.forEach(u => tempDoc.applyUpdate(u));
-  updates3.forEach(u => tempDoc.applyUpdate(u));
-  updates4.forEach(u => tempDoc.applyUpdate(u));
-  console.log(`Base order (A,B,C,D): ${tempDoc.getArray().join('')}`);
+  // Extract initial updates
+  const a_update = updates1.shift();
+  const b_update = updates2.shift();
+  const c_update = updates3.shift();
+  const d_update = updates4.shift();
 
   // 2. R1 (A) receives C. Inserts X. (State AC)
-  // Needs C form doc3.
-  const c_update = updates3.shift();
-  if (c_update) doc1.applyUpdate(c_update);
-
-  let r1State = doc1.getArray().join('');
-  console.log(`R1 state after receiving C: ${r1State}`); // Expect "AC"
-
-  if (r1State === "AC") {
-    doc1.insertArray(1, ['X']);
-    console.log(`R1 inserted X. State: ${doc1.getArray().join('')}`);
-  }
+  doc1.applyUpdate(c_update);
+  doc1.insertArray(1, ['X']);
+  const x_update = updates1.shift();
 
   // 3. R2 (B) receives A. Inserts Y. (State AB)
-  // Needs A from doc1.
-  const a_update = updates1.shift(); // A
-  if (a_update) doc2.applyUpdate(a_update);
-
-  let r2State = doc2.getArray().join('');
-  console.log(`R2 state after receiving A: ${r2State}`); // Expect "AB"
-
-  if (r2State === "AB") {
-    doc2.insertArray(1, ['Y']);
-    console.log(`R2 inserted Y. State: ${doc2.getArray().join('')}`);
-  }
+  doc2.applyUpdate(a_update);
+  doc2.insertArray(1, ['Y']);
+  const y_update = updates2.shift();
 
   // 4. R4 (D) receives A. Inserts Z. (State AD)
-  // Needs A. We can reuse a_update or fetch from updates1 if we didn't shift it out permanently?
-  // I shifted it out. But R4 can apply the same binary update.
-  if (a_update) doc4.applyUpdate(a_update);
-
-  let r4State = doc4.getArray().join('');
-  console.log(`R4 state after receiving A: ${r4State}`); // Expect "AD" -> A(0) < D(3)
-
-  if (r4State === "AD") {
-    doc4.insertArray(1, ['Z']);
-    console.log(`R4 inserted Z. State: ${doc4.getArray().join('')}`);
-  }
+  doc4.applyUpdate(a_update);
+  doc4.insertArray(1, ['Z']);
+  const z_update = updates4.shift();
 
   // 5. Merge all
   const finalDoc = factory.create(null, "final");
-  // Apply all updates from everyone.
-  // Note: a_update (A) was shifted.
-  finalDoc.applyUpdate(a_update); // A
-  if (updates1.length > 0) updates1.forEach(u => finalDoc.applyUpdate(u)); // X
-
-  // B and Y
-  updates2.forEach(u => finalDoc.applyUpdate(u));
-
-  // C
-  if (c_update) finalDoc.applyUpdate(c_update);
-  updates3.forEach(u => finalDoc.applyUpdate(u));
-
-  // D and Z
-  updates4.forEach(u => finalDoc.applyUpdate(u));
+  finalDoc.applyUpdate(a_update);
+  finalDoc.applyUpdate(x_update);
+  finalDoc.applyUpdate(b_update);
+  finalDoc.applyUpdate(y_update);
+  finalDoc.applyUpdate(c_update);
+  finalDoc.applyUpdate(d_update);
+  finalDoc.applyUpdate(z_update);
 
   const result = finalDoc.getArray().join('');
   console.log(`Final Result for ${name}: "${result}"`);
@@ -325,8 +359,11 @@ async function main() {
   await runFigure7("Fugue", new FugueFactory());
   await runFigure7("FugueMaxSimple", new FugueMaxSimpleFactory());
 
-  await runABCDWaitZ("Fugue", new FugueFactory());
-  await runABCDWaitZ("FugueMaxSimple", new FugueMaxSimpleFactory());
+  await runABCD_Interleaving("Fugue", new FugueFactory());
+  await runABCD_Interleaving("FugueMaxSimple", new FugueMaxSimpleFactory());
+
+  await runABCD_Deletion("Fugue", new FugueFactory());
+  await runABCD_Deletion("FugueMaxSimple", new FugueMaxSimpleFactory());
 }
 
 main();

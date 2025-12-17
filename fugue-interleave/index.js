@@ -234,12 +234,99 @@ async function runFigure7(name, factory) {
   console.log(`Final Result for ${name}: "${result}"`);
 }
 
+
+async function runABCDWaitZ(name, factory) {
+  console.log(`\n--- Running ABCD with Z (and X, Y) scenario for ${name} ---`);
+  // Replicas with deterministic IDs for A < B < C < D
+  let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
+  const doc1 = factory.create(u => updates1.push(u), "0"); // A
+  const doc2 = factory.create(u => updates2.push(u), "1"); // B
+  const doc3 = factory.create(u => updates3.push(u), "2"); // C
+  const doc4 = factory.create(u => updates4.push(u), "3"); // D
+
+  // 1. Concurrent inserts A, B, C, D
+  doc1.insertArray(0, ['A']);
+  doc2.insertArray(0, ['B']);
+  doc3.insertArray(0, ['C']);
+  doc4.insertArray(0, ['D']);
+
+  // Check Base Order
+  const tempDoc = factory.create(null, "temp");
+  updates1.forEach(u => tempDoc.applyUpdate(u));
+  updates2.forEach(u => tempDoc.applyUpdate(u));
+  updates3.forEach(u => tempDoc.applyUpdate(u));
+  updates4.forEach(u => tempDoc.applyUpdate(u));
+  console.log(`Base order (A,B,C,D): ${tempDoc.getArray().join('')}`);
+
+  // 2. R1 (A) receives C. Inserts X. (State AC)
+  // Needs C form doc3.
+  const c_update = updates3.shift();
+  if (c_update) doc1.applyUpdate(c_update);
+
+  let r1State = doc1.getArray().join('');
+  console.log(`R1 state after receiving C: ${r1State}`); // Expect "AC"
+
+  if (r1State === "AC") {
+    doc1.insertArray(1, ['X']);
+    console.log(`R1 inserted X. State: ${doc1.getArray().join('')}`);
+  }
+
+  // 3. R2 (B) receives A. Inserts Y. (State AB)
+  // Needs A from doc1.
+  const a_update = updates1.shift(); // A
+  if (a_update) doc2.applyUpdate(a_update);
+
+  let r2State = doc2.getArray().join('');
+  console.log(`R2 state after receiving A: ${r2State}`); // Expect "AB"
+
+  if (r2State === "AB") {
+    doc2.insertArray(1, ['Y']);
+    console.log(`R2 inserted Y. State: ${doc2.getArray().join('')}`);
+  }
+
+  // 4. R4 (D) receives A. Inserts Z. (State AD)
+  // Needs A. We can reuse a_update or fetch from updates1 if we didn't shift it out permanently?
+  // I shifted it out. But R4 can apply the same binary update.
+  if (a_update) doc4.applyUpdate(a_update);
+
+  let r4State = doc4.getArray().join('');
+  console.log(`R4 state after receiving A: ${r4State}`); // Expect "AD" -> A(0) < D(3)
+
+  if (r4State === "AD") {
+    doc4.insertArray(1, ['Z']);
+    console.log(`R4 inserted Z. State: ${doc4.getArray().join('')}`);
+  }
+
+  // 5. Merge all
+  const finalDoc = factory.create(null, "final");
+  // Apply all updates from everyone.
+  // Note: a_update (A) was shifted.
+  finalDoc.applyUpdate(a_update); // A
+  if (updates1.length > 0) updates1.forEach(u => finalDoc.applyUpdate(u)); // X
+
+  // B and Y
+  updates2.forEach(u => finalDoc.applyUpdate(u));
+
+  // C
+  if (c_update) finalDoc.applyUpdate(c_update);
+  updates3.forEach(u => finalDoc.applyUpdate(u));
+
+  // D and Z
+  updates4.forEach(u => finalDoc.applyUpdate(u));
+
+  const result = finalDoc.getArray().join('');
+  console.log(`Final Result for ${name}: "${result}"`);
+}
+
 async function main() {
   await runScenario("Fugue", new FugueFactory());
   await runScenario("FugueMaxSimple", new FugueMaxSimpleFactory());
 
   await runFigure7("Fugue", new FugueFactory());
   await runFigure7("FugueMaxSimple", new FugueMaxSimpleFactory());
+
+  await runABCDWaitZ("Fugue", new FugueFactory());
+  await runABCDWaitZ("FugueMaxSimple", new FugueMaxSimpleFactory());
 }
 
 main();

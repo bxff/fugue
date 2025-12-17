@@ -352,6 +352,69 @@ async function runABCD_Interleaving(name, factory) {
   console.log(`Final Result for ${name}: "${result}"`);
 }
 
+async function runABCD_Deletion_SyncFirst(name, factory) {
+  console.log(`\n--- Running ABCD Deletion Sync First scenario for ${name} ---`);
+  // Replicas with deterministic IDs for A < B < C < D
+  let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
+  const doc1 = factory.create(u => updates1.push(u), "0"); // R1
+  const doc2 = factory.create(u => updates2.push(u), "1"); // R2
+  const doc3 = factory.create(u => updates3.push(u), "2"); // R3
+  const doc4 = factory.create(u => updates4.push(u), "3"); // R4
+
+  // 1. Concurrent inserts A, B, C, D
+  doc1.insertArray(0, ['A']);
+  doc2.insertArray(0, ['B']);
+  doc3.insertArray(0, ['C']);
+  doc4.insertArray(0, ['D']);
+
+  // Extract initial updates for A, B, C, D
+  const a_update = updates1.shift();
+  const b_update = updates2.shift();
+  const c_update = updates3.shift();
+  const d_update = updates4.shift();
+
+  // 2. R2 (B) deletes B.
+  doc2.deleteArray(0, 1);
+  const b_delete_update = updates2.shift();
+  console.log(`R2 deleted B. State: ${doc2.getArray().join('')}`);
+
+  // 3. R1 receives B and its deletion BEFORE inserting Y.
+  doc1.applyUpdate(b_update);
+  doc1.applyUpdate(b_delete_update);
+  console.log(`R1 state after receiving deleted B: ${doc1.getArray().join('')}`); // Expect "A" but B is there as tombstone
+
+  // 4. R1 (A) inserts Y after A.
+  doc1.insertArray(1, ['Y']);
+  console.log(`R1 inserted Y. State: ${doc1.getArray().join('')}`); // Expect "AY"
+  const y_update = updates1.shift();
+
+  // 5. R3 (C) receives A from R1. Inserts X between A and C.
+  doc3.applyUpdate(a_update);
+  doc3.insertArray(1, ['X']);
+  console.log(`R3 inserted X. State: ${doc3.getArray().join('')}`); // Expect "AXC"
+  const x_update = updates3.shift();
+
+  // 6. R4 (D) receives A from R1. Inserts Z between A and D.
+  doc4.applyUpdate(a_update);
+  doc4.insertArray(1, ['Z']);
+  console.log(`R4 inserted Z. State: ${doc4.getArray().join('')}`); // Expect "AZD"
+  const z_update = updates4.shift();
+
+  // 7. Merge all
+  const finalDoc = factory.create(null, "final");
+  finalDoc.applyUpdate(a_update);
+  finalDoc.applyUpdate(b_update);
+  finalDoc.applyUpdate(c_update);
+  finalDoc.applyUpdate(d_update);
+  finalDoc.applyUpdate(b_delete_update);
+  finalDoc.applyUpdate(x_update);
+  finalDoc.applyUpdate(z_update);
+  finalDoc.applyUpdate(y_update);
+
+  const result = finalDoc.getArray().join('');
+  console.log(`Final Result for ${name}: "${result}"`);
+}
+
 async function main() {
   await runScenario("Fugue", new FugueFactory());
   await runScenario("FugueMaxSimple", new FugueMaxSimpleFactory());
@@ -364,6 +427,9 @@ async function main() {
 
   await runABCD_Deletion("Fugue", new FugueFactory());
   await runABCD_Deletion("FugueMaxSimple", new FugueMaxSimpleFactory());
+
+  await runABCD_Deletion_SyncFirst("Fugue", new FugueFactory());
+  await runABCD_Deletion_SyncFirst("FugueMaxSimple", new FugueMaxSimpleFactory());
 }
 
 main();

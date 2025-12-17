@@ -12,15 +12,15 @@ class FugueFactory {
   constructor() {
     this.rng = seedrandom("42");
   }
-  create(updateHandler) {
-    return new FugueCRDT(this.rng, updateHandler);
+  create(updateHandler, replicaID) {
+    return new FugueCRDT(this.rng, updateHandler, replicaID);
   }
 }
 
 class FugueCRDT {
-  constructor(rng, updateHandler) {
+  constructor(rng, updateHandler, replicaID) {
     this.doc = new CRuntime({
-      debugReplicaID: ReplicaIDs.pseudoRandom(rng),
+      debugReplicaID: replicaID || ReplicaIDs.pseudoRandom(rng),
     });
     if (updateHandler) {
       this.doc.on("Send", (e) => {
@@ -65,15 +65,15 @@ class FugueMaxSimpleFactory {
   constructor() {
     this.rng = seedrandom("42");
   }
-  create(updateHandler) {
-    return new FugueMaxSimpleCRDT(this.rng, updateHandler);
+  create(updateHandler, replicaID) {
+    return new FugueMaxSimpleCRDT(this.rng, updateHandler, replicaID);
   }
 }
 
 class FugueMaxSimpleCRDT {
-  constructor(rng, updateHandler) {
+  constructor(rng, updateHandler, replicaID) {
     this.doc = new CRuntime({
-      debugReplicaID: ReplicaIDs.pseudoRandom(rng),
+      debugReplicaID: replicaID || ReplicaIDs.pseudoRandom(rng),
     });
     if (updateHandler) {
       this.doc.on("Send", (e) => {
@@ -176,71 +176,59 @@ function runScenario(name, factory) {
 
 async function runFigure7(name, factory) {
   console.log(`\n--- Running Figure 7 scenario for ${name} ---`);
-  // Replicas
+  // Replicas with deterministic IDs to ensure A < B < C
+  // IDs "0", "1", "2" should sort 0 < 1 < 2.
   let updates1 = [], updates2 = [], updates3 = [];
-  const doc1 = factory.create(u => updates1.push(u)); // Replica 1
-  const doc2 = factory.create(u => updates2.push(u)); // Replica 2
-  const doc3 = factory.create(u => updates3.push(u)); // Replica 3
+  const doc1 = factory.create(u => updates1.push(u), "0"); // Replica 1 -> A
+  const doc2 = factory.create(u => updates2.push(u), "1"); // Replica 2 -> B
+  const doc3 = factory.create(u => updates3.push(u), "2"); // Replica 3 -> C
 
   // 1. Concurrent inserts A, B, C into empty list.
-  // Previous run showed order R1 < R3 < R2 (A, C, B).
-  // To get A < B < C, we map:
-  // Scenario Replica 1 -> doc1 (inserts A)
-  // Scenario Replica 2 -> doc3 (inserts B) (Middle ID)
-  // Scenario Replica 3 -> doc2 (inserts C) (Last ID)
-
   doc1.insertArray(0, ['A']);
-  doc3.insertArray(0, ['B']); // doc3 is "Scenario Replica 2"
-  doc2.insertArray(0, ['C']); // doc2 is "Scenario Replica 3"
+  doc2.insertArray(0, ['B']);
+  doc3.insertArray(0, ['C']);
 
   // Check the base order of A, B, C
-  const tempDoc = factory.create();
+  const tempDoc = factory.create(null, "temp");
   updates1.forEach(u => tempDoc.applyUpdate(u)); // A
-  updates3.forEach(u => tempDoc.applyUpdate(u)); // B
-  updates2.forEach(u => tempDoc.applyUpdate(u)); // C
+  updates2.forEach(u => tempDoc.applyUpdate(u)); // B
+  updates3.forEach(u => tempDoc.applyUpdate(u)); // C
 
   const baseOrder = tempDoc.getArray().join(''); // Expect "ABC"
-  console.log(`Base order (A,B,C) using remapped replicas: ${baseOrder}`);
+  console.log(`Base order (A,B,C) with deterministic IDs: ${baseOrder}`);
 
-  // 2. Scenario R1 receives {A, C}.
-  // Scenario R1 is doc1.
-  // C comes from doc2 (Scenario R3).
-  // doc1 needs update from doc2.
-  let c_update = updates2.shift(); // insert(C)
+  // 2. R1 receives {A, C}.
+  // R1 already has A. Needs C from R3 (doc3).
+  let c_update = updates3.shift(); // insert(C)
   if (c_update) doc1.applyUpdate(c_update);
 
   let r1State = doc1.getArray().join('');
-  console.log(`Scenario R1 state after receiving C: ${r1State}`); // Expect "AC"
+  console.log(`R1 state after receiving C: ${r1State}`); // Expect "AC"
 
-  // 3. Scenario R1 inserts X between A and C.
+  // 3. R1 inserts X between A and C.
   if (r1State === "AC") {
     doc1.insertArray(1, ['X']);
-    console.log(`Scenario R1 inserted X. State: ${doc1.getArray().join('')}`);
+    console.log(`R1 inserted X. State: ${doc1.getArray().join('')}`);
   }
 
-  // 4. Scenario R2 receives {A, B}.
-  // Scenario R2 is doc3.
-  // B comes from doc3 (itself).
-  // A comes from doc1.
+  // 4. R2 receives {A, B}.
+  // R2 already has B. Needs A from R1.
   let a_update = updates1.shift(); // insert(A)
-  if (a_update) doc3.applyUpdate(a_update);
+  if (a_update) doc2.applyUpdate(a_update);
 
-  let r2State = doc3.getArray().join('');
-  console.log(`Scenario R2 state after receiving A: ${r2State}`); // Expect "AB"
+  let r2State = doc2.getArray().join('');
+  console.log(`R2 state after receiving A: ${r2State}`); // Expect "AB" (because A(0) < B(1))
 
-  // 5. Scenario R2 inserts Y between A and B.
+  // 5. R2 inserts Y between A and B.
   if (r2State === "AB") {
-    doc3.insertArray(1, ['Y']);
-    console.log(`Scenario R2 inserted Y. State: ${doc3.getArray().join('')}`);
+    doc2.insertArray(1, ['Y']);
+    console.log(`R2 inserted Y. State: ${doc2.getArray().join('')}`);
   }
 
   // 6. Merge all.
   // Collect all updates into doc1.
-  // Updates from doc1: already applied.
-  // Updates from doc3 (Scenario R2): B, Y.
-  while (updates3.length > 0) doc1.applyUpdate(updates3.shift());
-  // Updates from doc2 (Scenario R3): C. (Already specific C update was applied, apply rest if any? C was just one update)
-  while (updates2.length > 0) doc1.applyUpdate(updates2.shift());
+  while (updates2.length > 0) doc1.applyUpdate(updates2.shift()); // B, Y
+  while (updates3.length > 0) doc1.applyUpdate(updates3.shift()); // Rest of C if any
 
   const result = doc1.getArray().join('');
   console.log(`Final Result for ${name}: "${result}"`);

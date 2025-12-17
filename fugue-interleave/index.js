@@ -244,7 +244,7 @@ async function runFigure7(name, factory) {
 
 
 async function runABCD_Deletion(name, factory) {
-  console.log(`\n--- Running ABCD with Z (and X, Y) scenario for ${name} ---`);
+  console.log(`\n--- Running ABCD Deletion scenario for ${name} ---`);
   // Replicas with deterministic IDs for A < B < C < D
   let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
   const doc1 = factory.create(u => updates1.push(u), "0"); // R1
@@ -303,7 +303,7 @@ async function runABCD_Deletion(name, factory) {
 }
 
 async function runABCD_Interleaving(name, factory) {
-  console.log(`\n--- Running ABCD Interleaving (Original) scenario for ${name} ---`);
+  console.log(`\n--- Running ABCD Interleaving scenario for ${name} ---`);
   // Replicas with deterministic IDs for A < B < C < D
   let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
   const doc1 = factory.create(u => updates1.push(u), "0"); // A
@@ -353,7 +353,7 @@ async function runABCD_Interleaving(name, factory) {
 }
 
 async function runABCD_Deletion_SyncFirst(name, factory) {
-  console.log(`\n--- Running ABCD Deletion Sync First scenario for ${name} ---`);
+  console.log(`\n--- Running ABCD Deletion (Sync First) scenario for ${name} ---`);
   // Replicas with deterministic IDs for A < B < C < D
   let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
   const doc1 = factory.create(u => updates1.push(u), "0"); // R1

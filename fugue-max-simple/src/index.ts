@@ -123,18 +123,37 @@ class Tree<T> {
     const parent = node.parent!;
     if (node.side === "R") {
       const rightSibs = parent.rightChildren;
-      // Siblings are in order: *reverse* order of their rightOrigins,
-      // breaking ties using the lexicographic order on id.sender.
+      // The "expected" rightOrigin is the next non-descendant of the parent.
+      const expectedRightOrigin = this.nextNonDescendant(parent);
+
+      // Check if node's rightOrigin matches the expected one.
+      const nodeMatchesExpected = node.rightOrigin === expectedRightOrigin;
+
+      // Ordering: 
+      // 1. Non-matching rightOrigins come first, ordered lexicographically by id.sender
+      // 2. Matching rightOrigins come last, ordered lexicographically by id.sender
+      //
+      // Visual example:
+      // [ R1(non-match), R2(non-match), R3(non-match), R4(match), R5(match) ]
+      //    ↑────────────────────────────────────────↑   ↑────────────────↑
+      //           sorted by id.sender                   sorted by id.sender
+      //           (non-matching group)                  (matching group, appears last)
       let i = 0;
       for (; i < rightSibs.length; i++) {
-        if (
-          !(
-            this.isLess(node.rightOrigin!, rightSibs[i].rightOrigin!) ||
-            (node.rightOrigin === rightSibs[i].rightOrigin &&
-              node.id.sender > rightSibs[i].id.sender)
-          )
-        )
+        const sibMatchesExpected = rightSibs[i].rightOrigin === expectedRightOrigin;
+
+        if (nodeMatchesExpected && !sibMatchesExpected) {
+          // Node matches, sibling doesn't -> node goes after sibling
+          continue;
+        } else if (!nodeMatchesExpected && sibMatchesExpected) {
+          // Node doesn't match, sibling does -> node goes before sibling
           break;
+        } else {
+          // Both match or both don't match -> order by id.sender lexicographically
+          if (node.id.sender <= rightSibs[i].id.sender) {
+            break;
+          }
+        }
       }
       rightSibs.splice(i, 0, node);
     } else {
@@ -148,62 +167,62 @@ class Tree<T> {
     }
   }
 
-  /**
-   * Returns whether a < b in the existing list order.
-   *
-   * null values are treated as the end of the list.
-   */
-  private isLess(a: Node<T> | null, b: Node<T> | null): boolean {
-    if (a === b) return false;
-    if (a === null) return false;
-    if (b === null) return true;
+  // /**
+  //  * Returns whether a < b in the existing list order.
+  //  *
+  //  * null values are treated as the end of the list.
+  //  */
+  // private isLess(a: Node<T> | null, b: Node<T> | null): boolean {
+  //   if (a === b) return false;
+  //   if (a === null) return false;
+  //   if (b === null) return true;
 
-    // Walk one node up the tree until they are both the same depth.
-    const aDepth = this.depth(a);
-    const bDepth = this.depth(b);
-    let aAnc = a;
-    let bAnc = b;
-    if (aDepth > bDepth) {
-      let lastSide: "L" | "R";
-      for (let i = aDepth; i > bDepth; i--) {
-        lastSide = aAnc.side;
-        aAnc = aAnc.parent!;
-      }
-      if (aAnc === b) {
-        // a is a descendant of b on lastSide.
-        return lastSide! === "L";
-      }
-    }
-    if (bDepth > aDepth) {
-      let lastSide: "L" | "R";
-      for (let i = bDepth; i > aDepth; i--) {
-        lastSide = bAnc.side;
-        bAnc = bAnc.parent!;
-      }
-      if (bAnc === a) {
-        // b is a descendant of a on lastSide.
-        return lastSide! === "R";
-      }
-    }
+  //   // Walk one node up the tree until they are both the same depth.
+  //   const aDepth = this.depth(a);
+  //   const bDepth = this.depth(b);
+  //   let aAnc = a;
+  //   let bAnc = b;
+  //   if (aDepth > bDepth) {
+  //     let lastSide: "L" | "R";
+  //     for (let i = aDepth; i > bDepth; i--) {
+  //       lastSide = aAnc.side;
+  //       aAnc = aAnc.parent!;
+  //     }
+  //     if (aAnc === b) {
+  //       // a is a descendant of b on lastSide.
+  //       return lastSide! === "L";
+  //     }
+  //   }
+  //   if (bDepth > aDepth) {
+  //     let lastSide: "L" | "R";
+  //     for (let i = bDepth; i > aDepth; i--) {
+  //       lastSide = bAnc.side;
+  //       bAnc = bAnc.parent!;
+  //     }
+  //     if (bAnc === a) {
+  //       // b is a descendant of a on lastSide.
+  //       return lastSide! === "R";
+  //     }
+  //   }
 
-    // Walk both nodes up the tree until we find a common ancestor.
-    while (aAnc.parent !== bAnc.parent) {
-      // If we reach the root, the loop will terminate, so both parents
-      // are non-null here.
-      aAnc = aAnc.parent!;
-      bAnc = bAnc.parent!;
-    }
-    // Now aAnc and bAnc are distinct siblings. See how they are sorted
-    // in their parent's child arrays.
-    if (aAnc.side !== bAnc.side) return aAnc.side === "L";
-    else {
-      const siblings =
-        aAnc.side === "L"
-          ? aAnc.parent!.leftChildren
-          : aAnc.parent!.rightChildren;
-      return siblings.indexOf(aAnc) < siblings.indexOf(bAnc);
-    }
-  }
+  //   // Walk both nodes up the tree until we find a common ancestor.
+  //   while (aAnc.parent !== bAnc.parent) {
+  //     // If we reach the root, the loop will terminate, so both parents
+  //     // are non-null here.
+  //     aAnc = aAnc.parent!;
+  //     bAnc = bAnc.parent!;
+  //   }
+  //   // Now aAnc and bAnc are distinct siblings. See how they are sorted
+  //   // in their parent's child arrays.
+  //   if (aAnc.side !== bAnc.side) return aAnc.side === "L";
+  //   else {
+  //     const siblings =
+  //       aAnc.side === "L"
+  //         ? aAnc.parent!.leftChildren
+  //         : aAnc.parent!.rightChildren;
+  //     return siblings.indexOf(aAnc) < siblings.indexOf(bAnc);
+  //   }
+  // }
 
   /**
    * Returns node's depth in the tree. Root = depth 0.

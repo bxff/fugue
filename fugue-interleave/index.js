@@ -302,8 +302,8 @@ async function runABCD_Deletion(name, factory) {
   console.log(`Final Result for ${name}: "${result}"`);
 }
 
-async function runABCD_Interleaving(name, factory) {
-  console.log(`\n--- Running ABCD Interleaving scenario for ${name} ---`);
+async function runABCD_Interleaving1(name, factory) {
+  console.log(`\n--- Running ABCD Interleaving 1 scenario for ${name} ---`);
   // Replicas with deterministic IDs for A < B < C < D
   let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
   const doc1 = factory.create(u => updates1.push(u), "0"); // A
@@ -337,6 +337,57 @@ async function runABCD_Interleaving(name, factory) {
   doc4.applyUpdate(a_update);
   doc4.insertArray(1, ['Z']);
   const z_update = updates4.shift();
+
+  // 5. Merge all
+  const finalDoc = factory.create(null, "final");
+  finalDoc.applyUpdate(a_update);
+  finalDoc.applyUpdate(x_update);
+  finalDoc.applyUpdate(b_update);
+  finalDoc.applyUpdate(y_update);
+  finalDoc.applyUpdate(c_update);
+  finalDoc.applyUpdate(d_update);
+  finalDoc.applyUpdate(z_update);
+
+  const result = finalDoc.getArray().join('');
+  console.log(`Final Result for ${name}: "${result}"`);
+}
+
+async function runABCD_Interleaving2(name, factory) {
+  console.log(`\n--- Running ABCD Interleaving 2 scenario for ${name} ---`);
+  // Replicas with deterministic IDs for A < B < C < D
+  let updates1 = [], updates2 = [], updates3 = [], updates4 = [];
+  const doc1 = factory.create(u => updates1.push(u), "0"); // A
+  const doc2 = factory.create(u => updates2.push(u), "1"); // B
+  const doc3 = factory.create(u => updates3.push(u), "2"); // C
+  const doc4 = factory.create(u => updates4.push(u), "3"); // D
+
+  // 1. Concurrent inserts A, B, C, D
+  doc1.insertArray(0, ['A']);
+  doc2.insertArray(0, ['B']);
+  doc3.insertArray(0, ['C']);
+  doc4.insertArray(0, ['D']);
+
+  // Extract initial updates
+  const a_update = updates1.shift();
+  const b_update = updates2.shift();
+  const c_update = updates3.shift();
+  const d_update = updates4.shift();
+
+  // 2. R4 (D) receives A and C. Inserts X between A and C. (State AC -> peer "3" inserts X)
+  doc4.applyUpdate(a_update);
+  doc4.applyUpdate(c_update);
+  doc4.insertArray(1, ['X']);
+  const x_update = updates4.shift();
+
+  // 3. R2 (B) receives A. Inserts Y. (State AB)
+  doc2.applyUpdate(a_update);
+  doc2.insertArray(1, ['Y']);
+  const y_update = updates2.shift();
+
+  // 4. R1 (A) receives D. Inserts Z between A and D. (State AD -> peer "0" inserts Z)
+  doc1.applyUpdate(d_update);
+  doc1.insertArray(1, ['Z']);
+  const z_update = updates1.shift();
 
   // 5. Merge all
   const finalDoc = factory.create(null, "final");
@@ -422,8 +473,11 @@ async function main() {
   await runFigure7("Fugue", new FugueFactory());
   await runFigure7("FugueMaxSimple", new FugueMaxSimpleFactory());
 
-  await runABCD_Interleaving("Fugue", new FugueFactory());
-  await runABCD_Interleaving("FugueMaxSimple", new FugueMaxSimpleFactory());
+  await runABCD_Interleaving1("Fugue", new FugueFactory());
+  await runABCD_Interleaving1("FugueMaxSimple", new FugueMaxSimpleFactory());
+
+  await runABCD_Interleaving2("Fugue", new FugueFactory());
+  await runABCD_Interleaving2("FugueMaxSimple", new FugueMaxSimpleFactory());
 
   await runABCD_Deletion("Fugue", new FugueFactory());
   await runABCD_Deletion("FugueMaxSimple", new FugueMaxSimpleFactory());

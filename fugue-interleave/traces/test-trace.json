@@ -1,0 +1,60 @@
+{
+  "seed": "1e87d39316c50812dadbd284debb019e",
+  "crdt": "Fugue",
+  "siteCount": 2,
+  "finalView": "ccc",
+  "prelude": [
+    {
+      "type": "insert",
+      "siteId": 0,
+      "index": 0,
+      "content": [
+        "c",
+        "c",
+        "c",
+        "c",
+        "c",
+        "c",
+        "c",
+        "c",
+        "c",
+        "c"
+      ]
+    }
+  ],
+  "sessions": [
+    {
+      "index": 0,
+      "sites": [
+        {
+          "siteId": 0,
+          "patch": [
+            {
+              "type": "delete",
+              "siteId": 0,
+              "index": 9,
+              "count": 1
+            }
+          ]
+        },
+        {
+          "siteId": 1,
+          "patch": [
+            {
+              "type": "delete",
+              "siteId": 1,
+              "index": 4,
+              "count": 6
+            },
+            {
+              "type": "delete",
+              "siteId": 1,
+              "index": 1,
+              "count": 1
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

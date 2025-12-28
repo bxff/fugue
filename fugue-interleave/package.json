@@ -1,13 +1,25 @@
 {
     "name": "fugue-interleave",
     "version": "1.0.0",
-    "description": "Fugue interleave test",
+    "description": "Fugue interleave test with commutativity fuzzer",
     "main": "index.js",
     "type": "module",
+    "scripts": {
+        "start": "node index.js",
+        "fuzz": "node fuzzer.js",
+        "fuzz:verbose": "node fuzzer.js 100 --verbose",
+        "fuzz:long": "node fuzzer.js 10000",
+        "generate-trace": "node generate-trace.js",
+        "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --testTimeout=60000",
+        "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch"
+    },
     "dependencies": {
         "@collabs/collabs": "0.13.4",
         "seedrandom": "^3.0.5",
         "fugue": "file:../fugue",
         "fugue-max-simple": "file:../fugue-max-simple"
+    },
+    "devDependencies": {
+        "jest": "^29.7.0"
     }
 }

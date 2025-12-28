@@ -1001,6 +1001,280 @@ export function runTwoUserFuzzer(CRDTClass, times, operationCount = 10, verbose 
 }
 
 // ---------------------------------------------------------
+// Ground Truth Fuzzer (inspired by Loro's fuzzing_match_str)
+// Compares CRDT with a simple array implementation
+// ---------------------------------------------------------
+
+export class GroundTruthFuzzer extends Fuzzer {
+  constructor(CRDTClass, seed) {
+    super(seed);
+    this.CRDTClass = CRDTClass;
+    this.crdt = new CRDTClass(null, "ground-truth-site");
+    this.groundTruth = []; // Simple array as ground truth
+    this.operations = [];
+  }
+
+  /**
+   * Generate and apply a random operation to both CRDT and ground truth
+   */
+  randomOperation() {
+    const length = this.groundTruth.length;
+    const doInsert = length === 0 || this.random() > 0.5;
+
+    if (doInsert) {
+      const pos = this.randomInt(0, length);
+      const char = this.pick(['a', 'b', 'c', 'd']);
+      
+      // Apply to ground truth
+      this.groundTruth.splice(pos, 0, char);
+      
+      // Apply to CRDT
+      this.crdt.insertArray(pos, [char]);
+      
+      this.operations.push({ type: 'insert', pos, content: char });
+    } else {
+      const pos = this.randomInt(0, length - 1);
+      const maxDel = Math.min(length - pos, 4);
+      const count = this.randomInt(1, maxDel);
+      
+      // Apply to ground truth
+      this.groundTruth.splice(pos, count);
+      
+      // Apply to CRDT
+      this.crdt.deleteArray(pos, count);
+      
+      this.operations.push({ type: 'delete', pos, count });
+    }
+  }
+
+  /**
+   * Run a fuzzing iteration and verify CRDT matches ground truth
+   */
+  run(operationCount = 50) {
+    for (let i = 0; i < operationCount; i++) {
+      this.randomOperation();
+      
+      // Verify after each operation
+      const crdtView = this.crdt.view();
+      const groundTruthView = this.groundTruth.join('');
+      
+      if (crdtView !== groundTruthView) {
+        throw new Error(
+          `Ground truth mismatch at operation ${i}!\n` +
+          `CRDT:         "${crdtView}"\n` +
+          `Ground truth: "${groundTruthView}"\n` +
+          `Last op: ${JSON.stringify(this.operations[i])}`
+        );
+      }
+    }
+    
+    return this.crdt.view();
+  }
+}
+
+export function runGroundTruthFuzzer(CRDTClass, iterations, operationCount = 50, verbose = false) {
+  let passed = 0;
+  let failed = 0;
+
+  for (let i = 0; i < iterations; i++) {
+    const fuzzer = new GroundTruthFuzzer(CRDTClass);
+    try {
+      const view = fuzzer.run(operationCount);
+      passed++;
+      if (verbose && i % 100 === 0) {
+        console.log(`Ground truth iteration ${i}: PASS - "${view.slice(0, 20)}..."`);
+      }
+    } catch (error) {
+      failed++;
+      console.error(`Ground truth FAILURE at iteration ${i}: ${error.message}`);
+      if (failed >= 5) {
+        console.log("Too many failures, stopping.");
+        break;
+      }
+    }
+  }
+
+  return { passed, failed };
+}
+
+// ---------------------------------------------------------
+// N-Actor Fuzzer (inspired by Loro's five-actors.rs)
+// Fixed number of actors with explicit sync actions
+// ---------------------------------------------------------
+
+/**
+ * Action types like Loro's enum Action
+ */
+const ActionType = {
+  INSERT: 'insert',
+  DELETE: 'delete',
+  SYNC: 'sync',
+};
+
+export class NActorFuzzer extends Fuzzer {
+  constructor(CRDTClass, actorCount = 5, seed) {
+    super(seed);
+    this.CRDTClass = CRDTClass;
+    this.actorCount = actorCount;
+    this.actors = [];
+    for (let i = 0; i < actorCount; i++) {
+      this.actors.push(new CRDTClass(null, `actor-${i}`));
+    }
+    this.actions = [];
+  }
+
+  /**
+   * Preprocess action to ensure valid bounds (like Loro's preprocess_action)
+   */
+  preprocessAction(action) {
+    const actor = this.actors[action.actor];
+    const len = actor.getArray().length;
+
+    if (action.type === ActionType.INSERT) {
+      action.pos = action.pos % (len + 1);
+    } else if (action.type === ActionType.DELETE) {
+      if (len === 0) {
+        action.pos = 0;
+        action.count = 0;
+      } else {
+        action.pos = action.pos % len;
+        action.count = Math.min(action.count, len - action.pos);
+      }
+    } else if (action.type === ActionType.SYNC) {
+      if (action.targetActor === action.actor) {
+        action.targetActor = (action.actor + 1) % this.actorCount;
+      }
+    }
+    return action;
+  }
+
+  /**
+   * Apply action to actors
+   */
+  applyAction(action) {
+    const actor = this.actors[action.actor];
+
+    if (action.type === ActionType.INSERT) {
+      actor.insertArray(action.pos, action.content);
+    } else if (action.type === ActionType.DELETE) {
+      if (action.count > 0) {
+        actor.deleteArray(action.pos, action.count);
+      }
+    } else if (action.type === ActionType.SYNC) {
+      const source = this.actors[action.targetActor];
+      // Get updates from source and apply to actor
+      for (const update of source.updates) {
+        actor.applyUpdate(update);
+      }
+    }
+  }
+
+  /**
+   * Generate a random action
+   */
+  randomAction() {
+    const actorIdx = this.randomInt(0, this.actorCount - 1);
+    const actionType = this.pick([ActionType.INSERT, ActionType.DELETE, ActionType.SYNC]);
+
+    let action;
+    if (actionType === ActionType.INSERT) {
+      const char = this.pick(['a', 'b', 'c', 'd']);
+      action = {
+        type: ActionType.INSERT,
+        actor: actorIdx,
+        pos: this.randomInt(0, 255),
+        content: [char],
+      };
+    } else if (actionType === ActionType.DELETE) {
+      action = {
+        type: ActionType.DELETE,
+        actor: actorIdx,
+        pos: this.randomInt(0, 255),
+        count: this.randomInt(1, 10),
+      };
+    } else {
+      action = {
+        type: ActionType.SYNC,
+        actor: actorIdx,
+        targetActor: this.randomInt(0, this.actorCount - 1),
+      };
+    }
+
+    return this.preprocessAction(action);
+  }
+
+  /**
+   * Run N actions and then merge all actors
+   */
+  run(actionCount = 100) {
+    // Generate and apply actions
+    for (let i = 0; i < actionCount; i++) {
+      const action = this.randomAction();
+      this.actions.push(action);
+      this.applyAction(action);
+    }
+
+    // Merge all actors pairwise (like Loro's fuzzing function)
+    for (let i = 0; i < this.actorCount; i++) {
+      for (let j = i + 1; j < this.actorCount; j++) {
+        const a = this.actors[i];
+        const b = this.actors[j];
+        
+        // Sync a <- b
+        for (const update of b.updates) {
+          a.applyUpdate(update);
+        }
+        
+        // Sync b <- a
+        for (const update of a.updates) {
+          b.applyUpdate(update);
+        }
+      }
+    }
+
+    // Verify all actors converged
+    const view0 = this.actors[0].view();
+    for (let i = 1; i < this.actorCount; i++) {
+      const viewI = this.actors[i].view();
+      if (view0 !== viewI) {
+        throw new Error(
+          `N-Actor convergence failed!\n` +
+          `Actor 0: "${view0}"\n` +
+          `Actor ${i}: "${viewI}"`
+        );
+      }
+    }
+
+    return view0;
+  }
+}
+
+export function runNActorFuzzer(CRDTClass, iterations, actorCount = 5, actionCount = 100, verbose = false) {
+  let passed = 0;
+  let failed = 0;
+
+  for (let i = 0; i < iterations; i++) {
+    const fuzzer = new NActorFuzzer(CRDTClass, actorCount);
+    try {
+      const view = fuzzer.run(actionCount);
+      passed++;
+      if (verbose && i % 100 === 0) {
+        console.log(`N-Actor (${actorCount}) iteration ${i}: PASS - "${view.slice(0, 20)}..."`);
+      }
+    } catch (error) {
+      failed++;
+      console.error(`N-Actor FAILURE at iteration ${i}: ${error.message}`);
+      if (failed >= 5) {
+        console.log("Too many failures, stopping.");
+        break;
+      }
+    }
+  }
+
+  return { passed, failed };
+}
+
+// ---------------------------------------------------------
 // Exports for different CRDT types
 // ---------------------------------------------------------
 
@@ -1046,6 +1320,22 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(`Two-user FugueMaxSimple: ${twoUserMaxSimple.passed} passed, ${twoUserMaxSimple.failed} failed\n`);
   } catch (e) {
     console.error(`Two-user FugueMaxSimple stopped: ${e.message}\n`);
+  }
+
+  console.log("--- Ground Truth Fuzzer (Fugue) ---");
+  try {
+    const groundTruthFugue = runGroundTruthFuzzer(FugueCRDT, iterations, 50, verbose);
+    console.log(`Ground truth Fugue: ${groundTruthFugue.passed} passed, ${groundTruthFugue.failed} failed\n`);
+  } catch (e) {
+    console.error(`Ground truth Fugue stopped: ${e.message}\n`);
+  }
+
+  console.log("--- N-Actor Fuzzer (5 actors, Fugue) ---");
+  try {
+    const nActorFugue = runNActorFuzzer(FugueCRDT, Math.floor(iterations / 2), 5, 100, verbose);
+    console.log(`N-Actor Fugue: ${nActorFugue.passed} passed, ${nActorFugue.failed} failed\n`);
+  } catch (e) {
+    console.error(`N-Actor Fugue stopped: ${e.message}\n`);
   }
 
   console.log("=== Fuzzing complete ===");

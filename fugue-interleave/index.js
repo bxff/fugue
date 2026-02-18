@@ -466,6 +466,64 @@ async function runABCD_Deletion_SyncFirst(name, factory) {
   console.log(`Final Result for ${name}: "${result}"`);
 }
 
+async function runConcurrentDE_BetweenBC(name, factory) {
+  console.log(`\n--- Running Concurrent DE between BC scenario for ${name} ---`);
+  // ID ordering: b("0") < a("1") < c("2"), d from "3", e from "4"
+  // b, a, c are all inserted concurrently at position 0 into an empty list.
+  // d and e are each inserted between b and c by replicas that only see {b, c} (not a).
+
+  let updates_b = [], updates_a = [], updates_c = [], updates_d = [], updates_e = [];
+  const doc_b = factory.create(u => updates_b.push(u), "0"); // b, ID "0"
+  const doc_a = factory.create(u => updates_a.push(u), "1"); // a, ID "1"
+  const doc_c = factory.create(u => updates_c.push(u), "2"); // c, ID "2"
+  const doc_d = factory.create(u => updates_d.push(u), "3"); // d, ID "3"
+  const doc_e = factory.create(u => updates_e.push(u), "4"); // e, ID "4"
+
+  // 1. Concurrent inserts b, a, c at position 0
+  doc_b.insertArray(0, ['b']);
+  doc_a.insertArray(0, ['a']);
+  doc_c.insertArray(0, ['c']);
+
+  const b_update = updates_b.shift();
+  const a_update = updates_a.shift();
+  const c_update = updates_c.shift();
+
+  // Verify base order: with IDs 0 < 1 < 2, expect "bac"
+  const tempDoc = factory.create(null, "temp");
+  tempDoc.applyUpdate(b_update);
+  tempDoc.applyUpdate(a_update);
+  tempDoc.applyUpdate(c_update);
+  console.log(`Base order (b,a,c): ${tempDoc.getArray().join('')}`);
+
+  // 2. doc_d receives only b and c (not a). State: "bc". Inserts d between b and c.
+  doc_d.applyUpdate(b_update);
+  doc_d.applyUpdate(c_update);
+  console.log(`R_d state after receiving b,c: ${doc_d.getArray().join('')}`); // "bc"
+  doc_d.insertArray(1, ['d']); // insert between b and c
+  console.log(`R_d inserted d. State: ${doc_d.getArray().join('')}`); // "bdc"
+  const d_update = updates_d.shift();
+
+  // 3. doc_e receives only b and c (not a). State: "bc". Inserts e between b and c.
+  doc_e.applyUpdate(b_update);
+  doc_e.applyUpdate(c_update);
+  console.log(`R_e state after receiving b,c: ${doc_e.getArray().join('')}`); // "bc"
+  doc_e.insertArray(1, ['e']); // insert between b and c
+  console.log(`R_e inserted e. State: ${doc_e.getArray().join('')}`); // "bec"
+  const e_update = updates_e.shift();
+
+  // 4. Merge all into a fresh doc
+  const finalDoc = factory.create(null, "final2");
+  finalDoc.applyUpdate(b_update);
+  finalDoc.applyUpdate(a_update);
+  finalDoc.applyUpdate(c_update);
+  finalDoc.applyUpdate(d_update);
+  finalDoc.applyUpdate(e_update);
+
+  const result = finalDoc.getArray().join('');
+  console.log(`Final Result for ${name}: "${result}"`);
+  // Key question: does 'a' interleave with d/e, or do d and e stay grouped between b and c?
+}
+
 async function main() {
   await runScenario("Fugue", new FugueFactory());
   await runScenario("FugueMaxSimple", new FugueMaxSimpleFactory());
@@ -484,6 +542,9 @@ async function main() {
 
   await runABCD_Deletion_SyncFirst("Fugue", new FugueFactory());
   await runABCD_Deletion_SyncFirst("FugueMaxSimple", new FugueMaxSimpleFactory());
+
+  await runConcurrentDE_BetweenBC("Fugue", new FugueFactory());
+  await runConcurrentDE_BetweenBC("FugueMaxSimple", new FugueMaxSimpleFactory());
 }
 
 main();

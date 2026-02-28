@@ -35,6 +35,11 @@ interface Node<T> {
    * unset = we're not a right-side child.
    */
   rightOrigin?: Node<T> | null;
+  /**
+   * When this node is deleted, the replacement rightOrigin for nodes
+   * that referenced this one. Used by the chain-hopper resolution.
+   */
+  replacementRightOrigin?: Node<T> | null;
 }
 
 interface InsertMessage<T> {
@@ -49,6 +54,8 @@ interface InsertMessage<T> {
 interface DeleteMessage {
   type: "delete";
   id: ID;
+  /** Proposed replacement rightOrigin (next alive node to the right of deleted node). */
+  newRightOrigin?: ID | null;
 }
 
 interface NodeSave<T> {
@@ -58,6 +65,7 @@ interface NodeSave<T> {
   side: "L" | "R";
   size: number;
   rightOrigin?: ID | null;
+  replacementRightOrigin?: ID | null;
 }
 
 class Tree<T> {
@@ -101,7 +109,11 @@ class Tree<T> {
       size: 0,
     };
     if (rightOriginID !== undefined) {
-      node.rightOrigin = rightOriginID === null ? null : this.getByID(rightOriginID);
+      let rightOriginNode = rightOriginID === null ? null : this.getByID(rightOriginID);
+      // Resolve through tombstone chain — if rightOrigin is deleted,
+      // hop to its replacement until we find a live node.
+      rightOriginNode = this.resolveRightOrigin(rightOriginNode);
+      node.rightOrigin = rightOriginNode;
     }
 
     // Add to nodesByID.
@@ -153,7 +165,7 @@ class Tree<T> {
    *
    * null values are treated as the end of the list.
    */
-  private isLess(a: Node<T> | null, b: Node<T> | null): boolean {
+  isLess(a: Node<T> | null, b: Node<T> | null): boolean {
     if (a === b) return false;
     if (a === null) return false;
     if (b === null) return true;
@@ -311,6 +323,68 @@ class Tree<T> {
     return null;
   }
 
+  /**
+   * Like nextNonDescendant, but skips tombstones. Returns the next
+   * non-deleted, non-descendant node, or null if at end of list.
+   */
+  nextNonDescendantAlive(node: Node<T>): Node<T> | null {
+    let current = this.nextNonDescendant(node);
+    while (current !== null && current.isDeleted) {
+      current = this.nextNonDescendant(current);
+    }
+    return current;
+  }
+
+  /**
+   * Chain-hopper: resolve a rightOrigin through tombstone replacements.
+   * If the rightOrigin is deleted, hop through replacementRightOrigin
+   * until we find a live node (or null for end-of-list).
+   */
+  resolveRightOrigin(node: Node<T> | null): Node<T> | null {
+    let current = node;
+    while (current !== null && current.isDeleted) {
+      if (current.replacementRightOrigin !== undefined) {
+        current = current.replacementRightOrigin;
+      } else {
+        // Tombstone with no replacement yet — use tree traversal as fallback
+        current = this.nextNonDescendantAlive(current);
+      }
+    }
+    return current;
+  }
+
+  /**
+   * Remove a node from its parent's children array (for re-sorting).
+   */
+  removeFromSiblings(node: Node<T>): void {
+    const parent = node.parent!;
+    const siblings =
+      node.side === "L" ? parent.leftChildren : parent.rightChildren;
+    const idx = siblings.indexOf(node);
+    if (idx !== -1) siblings.splice(idx, 1);
+  }
+
+  /**
+   * Update all nodes whose rightOrigin points to deletedNode.
+   * Sets their rightOrigin to newRightOrigin and re-sorts them
+   * among their siblings for convergence.
+   */
+  updateRightOriginsOnDelete(
+    deletedNode: Node<T>,
+    newRightOrigin: Node<T> | null
+  ): void {
+    for (const [, bySender] of this.nodesByID) {
+      for (const node of bySender) {
+        if (node.rightOrigin === deletedNode) {
+          node.rightOrigin = newRightOrigin;
+          // Re-sort: remove and re-insert into siblings
+          this.removeFromSiblings(node);
+          this.insertIntoSiblings(node);
+        }
+      }
+    }
+  }
+
   *traverse(node: Node<T>): IterableIterator<T> {
     // A recursive approach (like in the paper) would be simpler,
     // but overflows the stack at modest
@@ -369,6 +443,10 @@ class Tree<T> {
           nodeSave.rightOrigin =
             node.rightOrigin === null ? null : node.rightOrigin.id;
         }
+        if (node.replacementRightOrigin !== undefined) {
+          nodeSave.replacementRightOrigin =
+            node.replacementRightOrigin === null ? null : node.replacementRightOrigin.id;
+        }
         return nodeSave;
       });
     }
@@ -401,7 +479,7 @@ class Tree<T> {
         }))
       );
     }
-    // Next, fill in the parent and rightOrigin pointers.
+    // Next, fill in the parent, rightOrigin, and replacementRightOrigin pointers.
     for (const [sender, bySender] of this.nodesByID) {
       if (sender === "") continue;
       const bySenderSave = save[sender]!;
@@ -416,6 +494,12 @@ class Tree<T> {
             nodeSave.rightOrigin === null
               ? null
               : this.getByID(nodeSave.rightOrigin);
+        }
+        if (nodeSave.replacementRightOrigin !== undefined) {
+          node.replacementRightOrigin =
+            nodeSave.replacementRightOrigin === null
+              ? null
+              : this.getByID(nodeSave.replacementRightOrigin);
         }
       }
     }
@@ -493,9 +577,9 @@ export class FugueMaxSimple<T> extends CPrimitive {
       // leftOrigin has no right children, so the new node becomes
       // a right child of leftOrigin.
       msg = { type: "insert", id, value, parent: leftOrigin.id, side: "R" };
-      // rightOrigin is the node after leftOrigin in the tree traversal,
-      // given that leftOrigin has no right descendants.
-      const rightOrigin = this.tree.nextNonDescendant(leftOrigin);
+      // rightOrigin is the next *alive* node after leftOrigin in traversal,
+      // skipping tombstones to avoid phantom barriers.
+      const rightOrigin = this.tree.nextNonDescendantAlive(leftOrigin);
       msg.rightOrigin = rightOrigin === null ? null : rightOrigin.id;
     } else {
       // Otherwise, the new node is added as a left child of rightOrigin, which
@@ -519,7 +603,14 @@ export class FugueMaxSimple<T> extends CPrimitive {
   private deleteOne(index: number): void {
     // delete generator.
     const node = this.tree.getByIndex(this.tree.root, index);
-    const msg: DeleteMessage = { type: "delete", id: node.id };
+    // Compute the next alive node to the right — this is the proposed
+    // replacement rightOrigin for any nodes that referenced this one.
+    const nextAlive = this.tree.nextNonDescendantAlive(node);
+    const msg: DeleteMessage = {
+      type: "delete",
+      id: node.id,
+      newRightOrigin: nextAlive === null ? null : nextAlive.id,
+    };
     // Message is delivered to receivePrimitive ("on delivering" function).
     super.sendPrimitive(JSON.stringify(msg));
   }
@@ -541,7 +632,7 @@ export class FugueMaxSimple<T> extends CPrimitive {
         );
         // In a production implementation, we would emit an Insert event here.
         break;
-      case "delete":
+      case "delete": {
         // delete effector
         const node = this.tree.getByID(msg.id);
         if (!node.isDeleted) {
@@ -550,7 +641,65 @@ export class FugueMaxSimple<T> extends CPrimitive {
           this.tree.updateSize(node, -1);
           // In a production implementation, we would emit a Delete event here.
         }
+
+        // Compute the effective replacement rightOrigin.
+        // Pick the leftmost between local resolution and the proposed one.
+        const proposedRO =
+          msg.newRightOrigin !== undefined
+            ? msg.newRightOrigin === null
+              ? null
+              : this.tree.getByID(msg.newRightOrigin)
+            : undefined;
+
+        const localRO = this.tree.nextNonDescendantAlive(node);
+
+        let effectiveRO: Node<T> | null;
+        if (proposedRO === undefined) {
+          effectiveRO = localRO;
+        } else if (proposedRO === null && localRO === null) {
+          effectiveRO = null;
+        } else if (proposedRO === null) {
+          effectiveRO = localRO; // localRO is leftmost (non-null < null)
+        } else if (localRO === null) {
+          effectiveRO = proposedRO; // proposed is leftmost
+        } else {
+          // Both non-null: pick leftmost in document order
+          effectiveRO = this.tree.isLess(proposedRO, localRO)
+            ? proposedRO
+            : localRO;
+        }
+
+        // Resolve if effectiveRO is itself a tombstone
+        effectiveRO = this.tree.resolveRightOrigin(effectiveRO);
+
+        // Store on the tombstone for future chain-hopper lookups.
+        if (node.replacementRightOrigin === undefined) {
+          node.replacementRightOrigin = effectiveRO;
+        } else {
+          // Multiple deletes of same node (concurrent): pick leftmost
+          const existing = node.replacementRightOrigin;
+          if (existing === null && effectiveRO !== null) {
+            node.replacementRightOrigin = effectiveRO;
+          } else if (
+            existing !== null &&
+            effectiveRO !== null &&
+            this.tree.isLess(effectiveRO, existing)
+          ) {
+            node.replacementRightOrigin = effectiveRO;
+          } else if (effectiveRO === null && existing === null) {
+            // both null, no change
+          }
+          // else existing is already leftmost, keep it
+        }
+
+        // Update all nodes that reference this tombstone as their rightOrigin
+        // and re-sort them among siblings for convergence.
+        this.tree.updateRightOriginsOnDelete(
+          node,
+          node.replacementRightOrigin!
+        );
         break;
+      }
       default:
         throw new Error("Bad message: " + msg);
     }

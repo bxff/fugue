@@ -35,6 +35,14 @@ interface Node<T> {
    * unset = we're not a right-side child.
    */
   rightOrigin?: Node<T> | null;
+  /**
+   * True if this node's anchor (the node it was inserted directly after,
+   * including tombstones) was already deleted at generation time.
+   * Pre-deletion siblings order before post-deletion siblings, so content
+   * written with knowledge of a deletion lands after content that was
+   * anchored while the deleted node was still alive.
+   */
+  afterTombstone: boolean;
 }
 
 interface InsertMessage<T> {
@@ -44,6 +52,8 @@ interface InsertMessage<T> {
   parent: ID;
   side: "L" | "R";
   rightOrigin?: ID | null;
+  /** Set when the generation-time anchor was a tombstone. */
+  afterTombstone?: boolean;
 }
 
 interface DeleteMessage {
@@ -58,6 +68,7 @@ interface NodeSave<T> {
   side: "L" | "R";
   size: number;
   rightOrigin?: ID | null;
+  afterTombstone?: boolean;
 }
 
 class Tree<T> {
@@ -79,6 +90,7 @@ class Tree<T> {
       leftChildren: [],
       rightChildren: [],
       size: 0,
+      afterTombstone: false,
     };
     this.nodesByID.set("", [this.root]);
   }
@@ -88,7 +100,8 @@ class Tree<T> {
     value: T,
     parent: Node<T>,
     side: "L" | "R",
-    rightOriginID?: ID | null
+    rightOriginID?: ID | null,
+    afterTombstone = false
   ) {
     const node: Node<T> = {
       id,
@@ -99,9 +112,15 @@ class Tree<T> {
       leftChildren: [],
       rightChildren: [],
       size: 0,
+      afterTombstone,
     };
     if (rightOriginID !== undefined) {
-      node.rightOrigin = rightOriginID === null? null: this.getByID(rightOriginID);
+      // Store the rightOrigin as sent, even if it is (or later becomes) a
+      // tombstone. Tombstones never move in the tree, so they remain valid
+      // ordering anchors; rewriting them would destroy the structural
+      // information that encodes the inserter's intent.
+      node.rightOrigin =
+        rightOriginID === null ? null : this.getByID(rightOriginID);
     }
 
     // Add to nodesByID.
@@ -124,14 +143,18 @@ class Tree<T> {
     if (node.side === "R") {
       const rightSibs = parent.rightChildren;
       // Siblings are in order: *reverse* order of their rightOrigins,
-      // breaking ties using the lexicographic order on id.sender.
+      // breaking ties by era (pre-deletion anchors order before
+      // post-deletion anchors), then by the lexicographic order on
+      // id.sender.
       let i = 0;
       for (; i < rightSibs.length; i++) {
         if (
           !(
             this.isLess(node.rightOrigin!, rightSibs[i].rightOrigin!) ||
             (node.rightOrigin === rightSibs[i].rightOrigin &&
-              node.id.sender > rightSibs[i].id.sender)
+              (node.afterTombstone !== rightSibs[i].afterTombstone
+                ? node.afterTombstone
+                : node.id.sender > rightSibs[i].id.sender))
           )
         )
           break;
@@ -139,10 +162,16 @@ class Tree<T> {
       rightSibs.splice(i, 0, node);
     } else {
       const leftSibs = parent.leftChildren;
-      // Siblings are in lexicographic order by id.sender.
+      // Siblings are ordered by era (pre-deletion anchors first), then in
+      // lexicographic order by id.sender.
       let i = 0;
       for (; i < leftSibs.length; i++) {
-        if (!(node.id.sender > leftSibs[i].id.sender)) break;
+        if (
+          !(node.afterTombstone !== leftSibs[i].afterTombstone
+            ? node.afterTombstone
+            : node.id.sender > leftSibs[i].id.sender)
+        )
+          break;
       }
       leftSibs.splice(i, 0, node);
     }
@@ -153,7 +182,7 @@ class Tree<T> {
    *
    * null values are treated as the end of the list.
    */
-  private isLess(a: Node<T> | null, b: Node<T> | null): boolean {
+  isLess(a: Node<T> | null, b: Node<T> | null): boolean {
     if (a === b) return false;
     if (a === null) return false;
     if (b === null) return true;
@@ -280,7 +309,7 @@ class Tree<T> {
    */
   leftmostDescendant(node: Node<T>): Node<T> {
     let desc = node;
-    for (; desc.leftChildren.length !== 0; desc = desc.leftChildren[0]) {}
+    for (; desc.leftChildren.length !== 0; desc = desc.leftChildren[0]) { }
     return desc;
   }
 
@@ -309,6 +338,17 @@ class Tree<T> {
     }
     // We've reached the root without finding any further-right subtrees.
     return null;
+  }
+
+  /**
+   * Returns the node immediately after node in the traversal, including
+   * tombstones, or null if node is the last node.
+   */
+  nextInTraversal(node: Node<T>): Node<T> | null {
+    if (node.rightChildren.length !== 0) {
+      return this.leftmostDescendant(node.rightChildren[0]);
+    }
+    return this.nextNonDescendant(node);
   }
 
   *traverse(node: Node<T>): IterableIterator<T> {
@@ -369,6 +409,7 @@ class Tree<T> {
           nodeSave.rightOrigin =
             node.rightOrigin === null ? null : node.rightOrigin.id;
         }
+        if (node.afterTombstone) nodeSave.afterTombstone = true;
         return nodeSave;
       });
     }
@@ -398,6 +439,7 @@ class Tree<T> {
           size: nodeSave.size,
           leftChildren: [],
           rightChildren: [],
+          afterTombstone: nodeSave.afterTombstone === true,
         }))
       );
     }
@@ -488,25 +530,54 @@ export class FugueMaxSimple<T> extends CPrimitive {
         ? this.tree.root
         : this.tree.getByIndex(this.tree.root, index - 1);
 
-    let msg: InsertMessage<T>;
-    if (leftOrigin.rightChildren.length === 0) {
-      // leftOrigin has no right children, so the new node becomes
-      // a right child of leftOrigin.
-      msg = { type: "insert", id, value, parent: leftOrigin.id, side: "R" };
-      // rightOrigin is the node after leftOrigin in the tree traversal,
-      // given that leftOrigin has no right descendants.
-      const rightOrigin = this.tree.nextNonDescendant(leftOrigin);
-      msg.rightOrigin = rightOrigin === null ? null : rightOrigin.id;
-    } else {
-      // Otherwise, the new node is added as a left child of rightOrigin, which
-      // is the next node after leftOrigin *including tombstones*.
-      // In this case, rightOrigin is the leftmost descendant of leftOrigin's
-      // first right child.
-      const rightOrigin = this.tree.leftmostDescendant(
-        leftOrigin.rightChildren[0]
-      );
-      msg = { type: "insert", id, value, parent: rightOrigin.id, side: "L" };
+    // The gap between leftOrigin and the next alive node may contain
+    // tombstones that this replica knows are deleted. The new node anchors
+    // at the *right edge* of that gap: after every known tombstone,
+    // immediately before the alive rightOrigin.
+    //
+    // This encodes deletion-awareness structurally. Content whose
+    // rightOrigin is a node t was written while t was alive and stays
+    // before t's tombstone forever; content written after t's deletion
+    // anchors after the tombstone. So pre-deletion content
+    // deterministically precedes post-deletion content, with no ID
+    // tie-breaking. Concurrent inserts whose generators never saw these
+    // tombstones are unaffected: they anchor at the same tree level and
+    // are ordered by the usual rightOrigin/ID sibling rules.
+    let anchor = leftOrigin;
+    let next = this.tree.nextInTraversal(anchor);
+    while (next !== null && next.isDeleted) {
+      anchor = next;
+      next = this.tree.nextInTraversal(anchor);
     }
+    // Now next is the alive rightOrigin (or null = end of list) and anchor
+    // is its immediate predecessor in the full traversal (= leftOrigin when
+    // the gap contains no tombstones).
+
+    // Record whether the anchor was a tombstone. This one bit is what
+    // distinguishes "typed here while the neighbor was alive" from "typed
+    // here knowing the neighbor was deleted" when both produce a sibling
+    // at the same tree position; pre-deletion siblings order first.
+    // (The root is the begin sentinel, not a tombstone.)
+    const afterTombstone = anchor !== this.tree.root && anchor.isDeleted;
+
+    let msg: InsertMessage<T>;
+    if (anchor.rightChildren.length === 0) {
+      // The new node becomes a right child of anchor.
+      msg = {
+        type: "insert",
+        id,
+        value,
+        parent: anchor.id,
+        side: "R",
+        rightOrigin: next === null ? null : next.id,
+      };
+    } else {
+      // anchor has right children, so next (the alive rightOrigin) is the
+      // leftmost descendant of anchor's first right child. The new node
+      // becomes a left child of it.
+      msg = { type: "insert", id, value, parent: next!.id, side: "L" };
+    }
+    if (afterTombstone) msg.afterTombstone = true;
 
     // Message is delivered to receivePrimitive ("on delivering" function).
     super.sendPrimitive(JSON.stringify(msg));
@@ -537,12 +608,15 @@ export class FugueMaxSimple<T> extends CPrimitive {
           msg.value,
           this.tree.getByID(msg.parent),
           msg.side,
-          msg.rightOrigin
+          msg.rightOrigin,
+          msg.afterTombstone === true
         );
         // In a production implementation, we would emit an Insert event here.
         break;
-      case "delete":
-        // delete effector
+      case "delete": {
+        // delete effector. Deletion only toggles visibility: the node stays
+        // in the tree at the same position and remains a valid ordering
+        // anchor for any node whose rightOrigin references it.
         const node = this.tree.getByID(msg.id);
         if (!node.isDeleted) {
           node.value = null;
@@ -551,6 +625,7 @@ export class FugueMaxSimple<T> extends CPrimitive {
           // In a production implementation, we would emit a Delete event here.
         }
         break;
+      }
       default:
         throw new Error("Bad message: " + msg);
     }

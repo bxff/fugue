@@ -41,8 +41,24 @@ interface Node<T> {
    * Pre-deletion siblings order before post-deletion siblings, so content
    * written with knowledge of a deletion lands after content that was
    * anchored while the deleted node was still alive.
+   *
+   * DERIVED AT DELIVERY in this variant (era-recv): computed from the
+   * op's causal context, not shipped in the op.
    */
   afterTombstone: boolean;
+  /**
+   * Causal dot of the insert transaction that created this node:
+   * (id.sender, insertDot). Used at delivery to decide whether another
+   * op's generator knew this node.
+   */
+  insertDot: number;
+  /**
+   * Causal dots of the delete transactions for this node
+   * (possibly several, if deleted concurrently by multiple replicas).
+   * Used at delivery to decide whether another op's generator knew
+   * this node was deleted.
+   */
+  deleters: { sender: string; counter: number }[];
 }
 
 interface InsertMessage<T> {
@@ -52,8 +68,6 @@ interface InsertMessage<T> {
   parent: ID;
   side: "L" | "R";
   rightOrigin?: ID | null;
-  /** Set when the generation-time anchor was a tombstone. */
-  afterTombstone?: boolean;
 }
 
 interface DeleteMessage {
@@ -69,6 +83,8 @@ interface NodeSave<T> {
   size: number;
   rightOrigin?: ID | null;
   afterTombstone?: boolean;
+  insertDot?: number;
+  deleters?: { sender: string; counter: number }[];
 }
 
 class Tree<T> {
@@ -91,6 +107,8 @@ class Tree<T> {
       rightChildren: [],
       size: 0,
       afterTombstone: false,
+      insertDot: 0,
+      deleters: [],
     };
     this.nodesByID.set("", [this.root]);
   }
@@ -101,7 +119,8 @@ class Tree<T> {
     parent: Node<T>,
     side: "L" | "R",
     rightOriginID?: ID | null,
-    afterTombstone = false
+    afterTombstone = false,
+    insertDot = 0
   ) {
     const node: Node<T> = {
       id,
@@ -113,6 +132,8 @@ class Tree<T> {
       rightChildren: [],
       size: 0,
       afterTombstone,
+      insertDot,
+      deleters: [],
     };
     if (rightOriginID !== undefined) {
       // Store the rightOrigin as sent, even if it is (or later becomes) a
@@ -142,19 +163,23 @@ class Tree<T> {
     const parent = node.parent!;
     if (node.side === "R") {
       const rightSibs = parent.rightChildren;
-      // Siblings are in order: *reverse* order of their rightOrigins,
-      // breaking ties by era (pre-deletion anchors order before
-      // post-deletion anchors), then by the lexicographic order on
-      // id.sender.
+      // Siblings are in order: era FIRST (pre-deletion anchors before
+      // post-deletion anchors), then *reverse* order of their
+      // rightOrigins, then the lexicographic order on id.sender.
+      // Era-first is required: a post-era sibling's rightOrigin can lie
+      // beyond a pre-era sibling's rightOrigin (concurrent insert inside
+      // the dead gap), and the era principle must dominate reverse-RO.
       let i = 0;
       for (; i < rightSibs.length; i++) {
         if (
           !(
-            this.isLess(node.rightOrigin!, rightSibs[i].rightOrigin!) ||
-            (node.rightOrigin === rightSibs[i].rightOrigin &&
-              (node.afterTombstone !== rightSibs[i].afterTombstone
-                ? node.afterTombstone
-                : node.id.sender > rightSibs[i].id.sender))
+            node.afterTombstone !== rightSibs[i].afterTombstone
+              ? node.afterTombstone
+              : this.isLess(node.rightOrigin!, rightSibs[i].rightOrigin!) ||
+                (node.rightOrigin === rightSibs[i].rightOrigin &&
+                  (node.id.sender > rightSibs[i].id.sender ||
+                    (node.id.sender === rightSibs[i].id.sender &&
+                      node.id.counter > rightSibs[i].id.counter)))
           )
         )
           break;
@@ -169,7 +194,9 @@ class Tree<T> {
         if (
           !(node.afterTombstone !== leftSibs[i].afterTombstone
             ? node.afterTombstone
-            : node.id.sender > leftSibs[i].id.sender)
+            : node.id.sender > leftSibs[i].id.sender ||
+              (node.id.sender === leftSibs[i].id.sender &&
+                node.id.counter > leftSibs[i].id.counter))
         )
           break;
       }
@@ -314,6 +341,16 @@ class Tree<T> {
   }
 
   /**
+   * Returns whether node is a (strict or non-strict) descendant of anc.
+   */
+  isDescendant(node: Node<T>, anc: Node<T>): boolean {
+    for (let cur: Node<T> | null = node; cur !== null; cur = cur.parent) {
+      if (cur === anc) return true;
+    }
+    return false;
+  }
+
+  /**
    * Returns the next node in the traversal that is *not* a
    * descendant of node, or null if that is the end. Includes tombstones.
    */
@@ -410,6 +447,8 @@ class Tree<T> {
             node.rightOrigin === null ? null : node.rightOrigin.id;
         }
         if (node.afterTombstone) nodeSave.afterTombstone = true;
+        nodeSave.insertDot = node.insertDot;
+        nodeSave.deleters = node.deleters;
         return nodeSave;
       });
     }
@@ -440,6 +479,8 @@ class Tree<T> {
           leftChildren: [],
           rightChildren: [],
           afterTombstone: nodeSave.afterTombstone === true,
+          insertDot: nodeSave.insertDot ?? 0,
+          deleters: nodeSave.deleters ?? [],
         }))
       );
     }
@@ -522,7 +563,11 @@ export class FugueMaxSimple<T> extends CPrimitive {
   }
 
   private insertOne(index: number, value: T) {
-    // insert generator.
+    // insert generator. Payload is CANONICAL FugueMax (tombstone-inclusive
+    // origins) — identical whether or not this replica has synced the
+    // deletions of nodes in the visible gap. Era information is NOT in the
+    // payload; receivers derive it from the op's causal context (vector
+    // clock) at delivery time.
     const id = { sender: this.runtime.replicaID, counter: this.counter };
     this.counter++;
     const leftOrigin =
@@ -530,57 +575,48 @@ export class FugueMaxSimple<T> extends CPrimitive {
         ? this.tree.root
         : this.tree.getByIndex(this.tree.root, index - 1);
 
-    // The gap between leftOrigin and the next alive node may contain
-    // tombstones that this replica knows are deleted. The new node anchors
-    // at the *right edge* of that gap: after every known tombstone,
-    // immediately before the alive rightOrigin.
-    //
-    // This encodes deletion-awareness structurally. Content whose
-    // rightOrigin is a node t was written while t was alive and stays
-    // before t's tombstone forever; content written after t's deletion
-    // anchors after the tombstone. So pre-deletion content
-    // deterministically precedes post-deletion content, with no ID
-    // tie-breaking. Concurrent inserts whose generators never saw these
-    // tombstones are unaffected: they anchor at the same tree level and
-    // are ordered by the usual rightOrigin/ID sibling rules.
-    let anchor = leftOrigin;
-    let next = this.tree.nextInTraversal(anchor);
-    while (next !== null && next.isDeleted) {
-      anchor = next;
-      next = this.tree.nextInTraversal(anchor);
-    }
-    // Now next is the alive rightOrigin (or null = end of list) and anchor
-    // is its immediate predecessor in the full traversal (= leftOrigin when
-    // the gap contains no tombstones).
-
-    // Record whether the anchor was a tombstone. This one bit is what
-    // distinguishes "typed here while the neighbor was alive" from "typed
-    // here knowing the neighbor was deleted" when both produce a sibling
-    // at the same tree position; pre-deletion siblings order first.
-    // (The root is the begin sentinel, not a tombstone.)
-    const afterTombstone = anchor !== this.tree.root && anchor.isDeleted;
-
     let msg: InsertMessage<T>;
-    if (anchor.rightChildren.length === 0) {
-      // The new node becomes a right child of anchor.
+    let canonicalNext: Node<T> | null;
+    if (leftOrigin.rightChildren.length === 0) {
+      // The new node becomes a right child of leftOrigin.
+      canonicalNext = this.tree.nextNonDescendant(leftOrigin);
       msg = {
         type: "insert",
         id,
         value,
-        parent: anchor.id,
+        parent: leftOrigin.id,
         side: "R",
-        rightOrigin: next === null ? null : next.id,
+        rightOrigin: canonicalNext === null ? null : canonicalNext.id,
       };
     } else {
-      // anchor has right children, so next (the alive rightOrigin) is the
-      // leftmost descendant of anchor's first right child. The new node
-      // becomes a left child of it.
-      msg = { type: "insert", id, value, parent: next!.id, side: "L" };
+      // The new node becomes a left child of the tombstone-inclusive next
+      // node (its right origin).
+      canonicalNext = this.tree.leftmostDescendant(
+        leftOrigin.rightChildren[0]
+      );
+      msg = { type: "insert", id, value, parent: canonicalNext.id, side: "L" };
     }
-    if (afterTombstone) msg.afterTombstone = true;
+
+    // Request vector clock entries the receiver's era walk will need:
+    // for each known tombstone crossed by the generator's local walk, the
+    // entries of its deleters; and the entry of the generator's alive next
+    // (the stop node's insert dot). Unrequested entries read 0 at the
+    // receiver, which correctly makes concurrent nodes "skip" during the
+    // walk.
+    const vectorClockKeys: string[] = [];
+    let current = canonicalNext;
+    while (current !== null) {
+      if (current.isDeleted) {
+        for (const d of current.deleters) vectorClockKeys.push(d.sender);
+        current = this.tree.nextInTraversal(current);
+      } else {
+        vectorClockKeys.push(current.id.sender);
+        break;
+      }
+    }
 
     // Message is delivered to receivePrimitive ("on delivering" function).
-    super.sendPrimitive(JSON.stringify(msg));
+    super.sendPrimitive(JSON.stringify(msg), { vectorClockKeys } as any);
   }
 
   delete(startIndex: number, count = 1): void {
@@ -601,23 +637,99 @@ export class FugueMaxSimple<T> extends CPrimitive {
   ): void {
     const msg: InsertMessage<T> | DeleteMessage = JSON.parse(<string>message);
     switch (msg.type) {
-      case "insert":
-        // insert effector
+      case "insert": {
+        const runtimeMeta = meta.runtimeExtra as {
+          senderCounter: number;
+          vectorClock: { get(replicaID: string): number };
+        };
+        // This insert's causal dot (transaction counter). Accessed during
+        // the local echo too, which is what makes the runtime transmit it
+        // to remote replicas.
+        const insertDot = runtimeMeta.senderCounter;
+        const vc = (sender: string) =>
+          runtimeMeta.vectorClock === undefined
+            ? 0
+            : runtimeMeta.vectorClock.get(sender);
+
+        // Era walk: reconstruct the generator's view from the op graph.
+        // Start at the canonical (tombstone-inclusive) next node.
+        let current: Node<T> | null =
+          msg.side === "R"
+            ? msg.rightOrigin === null || msg.rightOrigin === undefined
+              ? null
+              : this.tree.getByID(msg.rightOrigin)
+            : this.tree.getByID(msg.parent);
+        let anchor: Node<T> | null = null; // last crossed tombstone
+        while (current !== null) {
+          if (
+            current.isDeleted &&
+            current.deleters.some((d) => vc(d.sender) >= d.counter)
+          ) {
+            // Tombstone whose deletion the generator knew: cross it.
+            anchor = current;
+            current = this.tree.nextInTraversal(current);
+          } else if (vc(current.id.sender) >= current.insertDot) {
+            // The generator's alive next: stop here.
+            break;
+          } else {
+            // Concurrent node the generator never saw: skip it.
+            current = this.tree.nextInTraversal(current);
+          }
+        }
+
+        let parent: Node<T>;
+        let side: "L" | "R";
+        let rightOriginID: ID | null | undefined;
+        let afterTombstone: boolean;
+        if (anchor === null) {
+          // No known tombstone crossed: keep the canonical placement.
+          parent = this.tree.getByID(msg.parent);
+          side = msg.side;
+          rightOriginID = msg.side === "R" ? msg.rightOrigin : undefined;
+          afterTombstone = false;
+        } else if (current !== null && this.tree.isDescendant(current, anchor)) {
+          // The anchor had right children in the generator's view, so the
+          // generator's next is the leftmost descendant of the anchor's
+          // first right child. Nest the new node as a left child of it,
+          // exactly as generation-time era anchoring does. (Ancestry of the
+          // stop node is fixed by the op's causal past, so this branch is
+          // delivery-order independent.)
+          parent = current;
+          side = "L";
+          rightOriginID = undefined;
+          afterTombstone = true;
+        } else {
+          // Re-anchor after the whole known-dead chain.
+          parent = anchor;
+          side = "R";
+          rightOriginID = current === null ? null : current.id;
+          afterTombstone = true;
+        }
+
         this.tree.addNode(
           msg.id,
           msg.value,
-          this.tree.getByID(msg.parent),
-          msg.side,
-          msg.rightOrigin,
-          msg.afterTombstone === true
+          parent,
+          side,
+          rightOriginID,
+          afterTombstone,
+          insertDot
         );
         // In a production implementation, we would emit an Insert event here.
         break;
+      }
       case "delete": {
         // delete effector. Deletion only toggles visibility: the node stays
         // in the tree at the same position and remains a valid ordering
         // anchor for any node whose rightOrigin references it.
         const node = this.tree.getByID(msg.id);
+        // Record this delete's causal dot so later inserts' era walks can
+        // tell whether their generator knew about it.
+        const runtimeMeta = meta.runtimeExtra as { senderCounter: number };
+        node.deleters.push({
+          sender: meta.senderID,
+          counter: runtimeMeta.senderCounter,
+        });
         if (!node.isDeleted) {
           node.value = null;
           node.isDeleted = true;

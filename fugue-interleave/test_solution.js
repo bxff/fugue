@@ -399,5 +399,135 @@ console.log("TYPING PATTERNS across a dead gap");
   }
 }
 
+// =====================================================================
+// UWZX (adversarial, from the Fable review) — mixed-era right siblings
+// with different rightOrigins. This is the case that breaks a
+// reverse-RO-first comparator: post-era x has RO=e, pre-era z has RO=w,
+// and w ≺ e, so reverse-RO alone would put x first ("xzwe"). Era-first
+// sibling ordering must give "zxwe" — including when x's replica had
+// synced the unrelated concurrent w before typing (S7: the merged order
+// must not flip with the typer's sync state).
+// =====================================================================
+console.log("UWZX — era-first over reverse-RO, sync-robust");
+for (const xSawW of [false, true]) {
+  const e0 = new Doc("0"); e0.insert(0, "e"); const e_up = e0.pop();
+  const u1 = new Doc("1"); u1.apply(e_up); u1.insert(0, "u"); const u_up = u1.pop();
+  const w7 = new Doc("7"); w7.apply(e_up); w7.insert(0, "w"); const w_up = w7.pop();
+  const z8 = new Doc("8"); [e_up, u_up, w_up].forEach(u => z8.apply(u)); z8.insert(1, "z"); const z_up = z8.pop();
+  const x9 = new Doc("9");
+  x9.apply(e_up); x9.apply(u_up);
+  if (xSawW) x9.apply(w_up);
+  x9.del(0); const udel = x9.pop();
+  x9.insert(0, "x"); const x_up = x9.pop();
+  // All delivery permutations of the concurrent updates.
+  const baseOps = [e_up];
+  const concurrentOps = [u_up, w_up, z_up, udel, x_up];
+  const orders = [];
+  const perm = (rest, acc) => {
+    if (rest.length === 0) { orders.push([...baseOps, ...acc]); return; }
+    for (let i = 0; i < rest.length; i++)
+      perm(rest.slice(0, i).concat(rest.slice(i + 1)), [...acc, rest[i]]);
+  };
+  perm(concurrentOps, []);
+  expectAll(orders, "zxwe", `UWZX xSawW=${xSawW}`);
+}
+
+// =====================================================================
+// POINT1-minus-m — n typed at the end after deleting b and d; concurrent
+// w typed between b and d while they were alive. The era principle puts
+// w before n ("aywn"); this intentionally overrides forward
+// non-interleaving (y and n need not be consecutive), which is the
+// accepted trade for full era separation.
+// =====================================================================
+console.log("POINT1-minus-m — post-era content after the whole dead chain");
+{
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const p9 = new Doc("9"); p9.apply(a_up); p9.apply(b_up); p9.insert(1, "y"); const y_up = p9.pop();
+  const p8 = new Doc("8"); p8.apply(a_up); p8.apply(b_up); p8.insert(2, "d"); const d_up = p8.pop();
+  const p0 = new Doc("0"); [a_up, b_up, y_up, d_up].forEach(u => p0.apply(u));
+  p0.del(2); const bdel = p0.pop(); p0.del(2); const ddel = p0.pop();
+  p0.insert(2, "n"); const n_up = p0.pop();
+  const p2 = new Doc("2"); [a_up, b_up, y_up, d_up].forEach(u => p2.apply(u)); p2.insert(3, "w"); const w_up = p2.pop();
+  const orders = [];
+  const rest = [bdel, ddel, n_up, w_up];
+  const perm = (r, acc) => {
+    if (r.length === 0) { orders.push([a_up, b_up, y_up, d_up, ...acc]); return; }
+    for (let i = 0; i < r.length; i++)
+      perm(r.slice(0, i).concat(r.slice(i + 1)), [...acc, r[i]]);
+  };
+  perm(rest, []);
+  expectAll(orders, "aywn", "post-era n after chain, w before n");
+}
+
+// =====================================================================
+// PAYLOAD SYNCHRONY — the op bytes must not depend on which deletes the
+// generator had synced (this is what distinguishes the receiver-side
+// derivation from the previous generation-time fix). Two replicas at the
+// same visible state, one having synced del(b) and one not, generate
+// byte-identical insert ops (ignoring the fresh id). Same for
+// insert-then-delete vs delete-then-insert orderings by the same user.
+// =====================================================================
+console.log("PAYLOAD SYNCHRONY — ops independent of delete-sync state");
+{
+  class Doc2 {
+    constructor(id) {
+      this.doc = new CRuntime({ debugReplicaID: id });
+      this.ups = [];
+      this.sent = [];
+      this.doc.on("Send", (e) => {
+        const u = new Uint8Array(e.message.length + 1);
+        u.set(e.message);
+        u[e.message.length] = 0;
+        this.ups.push(u);
+        const text = new TextDecoder().decode(e.message);
+        const idx = text.indexOf('{"type":"insert"');
+        if (idx >= 0) {
+          let depth = 0, end = idx;
+          for (let i = idx; i < text.length; i++) {
+            if (text[i] === "{") depth++;
+            else if (text[i] === "}") { depth--; if (depth === 0) { end = i + 1; break; } }
+          }
+          this.sent.push(JSON.parse(text.slice(idx, end)));
+        }
+      });
+      this.arr = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));
+    }
+    insert(idx, val) { this.doc.transact(() => this.arr.insert(idx, val)); }
+    del(idx) { this.doc.transact(() => this.arr.delete(idx, 1)); }
+    apply(u) { this.doc.receive(u.subarray(0, u.length - 1)); }
+    pop() { return this.ups.shift(); }
+  }
+  const strip = (m) => JSON.stringify({ value: m.value, parent: m.parent, side: m.side, rightOrigin: m.rightOrigin ?? null });
+
+  const base = new Doc2("0");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const delPeer = new Doc2("1");
+  delPeer.apply(a_up); delPeer.apply(b_up);
+  delPeer.del(1); const bdel = delPeer.pop();
+  const pA = new Doc2("2");
+  pA.apply(a_up); pA.apply(b_up); pA.apply(bdel);
+  pA.insert(1, "c"); const cA = pA.sent[pA.sent.length - 1];
+  const pB = new Doc2("3");
+  pB.apply(a_up); pB.apply(b_up);
+  pB.insert(1, "c"); const cB = pB.sent[pB.sent.length - 1];
+  const d1 = new Doc2("8");
+  d1.apply(a_up); d1.apply(b_up);
+  d1.insert(1, "c"); const c1 = d1.sent[d1.sent.length - 1];
+  d1.del(2);
+  const d2 = new Doc2("9");
+  d2.apply(a_up); d2.apply(b_up); d2.del(1);
+  d2.insert(1, "c"); const c2 = d2.sent[d2.sent.length - 1];
+  const allSame =
+    strip(cA) === strip(cB) && strip(cA) === strip(c1) && strip(cA) === strip(c2);
+  if (allSame) { console.log(`  ✅ all four payloads identical: ${strip(cA)}`); pass++; }
+  else {
+    console.log(`  ❌ payloads differ: sync=${strip(cA)}/${strip(cB)} order=${strip(c1)}/${strip(c2)}`);
+    fail++;
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

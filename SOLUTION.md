@@ -4,7 +4,7 @@ This is the complete specification of the design implemented in
 `fugue-max-simple/src/index.ts`. It is intended to be self-contained: one
 principle, one set of rules, one complete list of what the design gives and
 what it deliberately overrides. All claims are pinned by
-`fugue-interleave/test_solution.js` (23 scenarios, all delivery
+`fugue-interleave/test_solution.js` (32 scenarios, all delivery
 permutations, both sender assignments).
 
 ## The one principle
@@ -183,11 +183,13 @@ tombstone-inclusive order ≺:
   clause): for a post-era op B, every element strictly between vLO(B) and
   B is one of: (i) a ghost in K(B); (ii) an element X with eraRO(X) ∈
   K(B) (content anchored into the crossed slots); (iii) a descendant of a
-  (i)- or (ii)-element; or (iv) an element X with eraRO(X) at-or-beyond
-  eraRO(B) in ≺ — pre-era content whose author believed the list ended
-  beyond B's stop, concurrent with B (example: x typed at the end by an
-  author who never saw the chain; B typed after the deletion without
-  seeing x; then x ≺ B with eraRO(x) = eraRO(B) = end). If no element
+  (i)-, (ii)-, or (iv)-element; or (iv) an element X with eraRO(X)
+  at-or-beyond eraRO(B) in ≺ — pre-era content whose author believed the
+  list ended beyond B's stop, concurrent with B (example: x typed at the
+  end by an author who never saw the chain; B typed after the deletion
+  without seeing x; then x ≺ B with eraRO(x) = eraRO(B) = end; and v
+  typed between a and x by another author — a descendant of the
+  (iv)-element — likewise sits between vLO(B) and B). If no element
   satisfies (i)–(iv), vLO(B) and B are consecutive among visible
   elements.
 - **(2′) Backward non-interleaving with rebuilt exceptions.** If B =

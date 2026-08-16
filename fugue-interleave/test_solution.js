@@ -683,5 +683,129 @@ for (const [xSender, expected] of [["1", "axB"], ["9", "aBx"]]) {
   ], expected, `corollary(iv) x=${xSender}`);
 }
 
+// =====================================================================
+// COROLLARY (iii)+(iv) — descendant of an (iv)-element (found by the
+// final Fable review). Author who saw only "a" types x at the end
+// (an (iv)-element); another author types v between a and x (descendant
+// of the (iv)-element); a third deletes b and types B. v sits strictly
+// between vLO(B)=a and B and is sanctioned only by the widened clause
+// (iii): descendant of an (i)-, (ii)-, or (iv)-element. The x-vs-chain
+// order is ID-decided; both outcomes keep the v-before-x pin intact.
+// =====================================================================
+console.log("COROLLARY (iii)+(iv) — descendant of an (iv)-element");
+for (const [xSender, expected] of [["1", "avxB"], ["9", "aBvx"]]) {
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const px = new Doc(xSender);
+  px.apply(a_up);
+  px.insert(1, "x"); const x_up = px.pop();       // author never saw b
+  const pv = new Doc("2");
+  pv.apply(a_up); pv.apply(x_up);
+  pv.insert(1, "v"); const v_up = pv.pop();       // between a and x
+  const pB = new Doc("5");
+  pB.apply(a_up); pB.apply(b_up);
+  pB.del(1); const bdel = pB.pop();
+  pB.insert(1, "B"); const B_up = pB.pop();       // author never saw x
+  expectAll([
+    [a_up, b_up, x_up, v_up, bdel, B_up],
+    [a_up, b_up, bdel, B_up, x_up, v_up],
+    [a_up, b_up, x_up, bdel, v_up, B_up],
+    [a_up, b_up, bdel, x_up, v_up, B_up],
+  ], expected, `corollary(iii+iv) x=${xSender}`);
+}
+
+// =====================================================================
+// T8 — same-anchor post-era ops with different stop nodes. Pre-era m
+// (sender 3) and n (sender 9) typed after b while alive; b deleted; x1
+// knows {del b, m} and types between a and m; x2 knows {del b, n} and
+// types between a and n; x3 knows {del b} only and types after a. The
+// emergent rule: each post-era op sits immediately before the leftmost
+// node it knew alive after its chain; pins dominate era.
+// =====================================================================
+console.log("T8 — same-anchor multi-stop, pins dominate era");
+{
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const pm1 = new Doc("3");
+  pm1.apply(a_up); pm1.apply(b_up);
+  pm1.insert(2, "m"); const m1_up = pm1.pop();
+  const pm2 = new Doc("9");
+  pm2.apply(a_up); pm2.apply(b_up);
+  pm2.insert(2, "n"); const m2_up = pm2.pop();
+  const pdel = new Doc("5");
+  pdel.apply(a_up); pdel.apply(b_up);
+  pdel.del(1); const bdel = pdel.pop();
+  const px1 = new Doc("6");
+  [a_up, b_up, bdel, m1_up].forEach(u => px1.apply(u));
+  px1.insert(1, "1"); const x1_up = px1.pop();
+  const px2 = new Doc("7");
+  [a_up, b_up, bdel, m2_up].forEach(u => px2.apply(u));
+  px2.insert(1, "2"); const x2_up = px2.pop();
+  const px3 = new Doc("8");
+  [a_up, b_up, bdel].forEach(u => px3.apply(u));
+  px3.insert(1, "3"); const x3_up = px3.pop();
+  expectAll([
+    [a_up, b_up, m1_up, m2_up, bdel, x1_up, x2_up, x3_up],
+    [a_up, b_up, bdel, x3_up, m2_up, x2_up, m1_up, x1_up],
+    [a_up, b_up, m2_up, bdel, x2_up, x1_up, m1_up, x3_up],
+    [a_up, b_up, m1_up, x1_up, bdel, m2_up, x2_up, x3_up],
+  ], "a1m2n3", "T8 same-anchor multi-stop");
+}
+
+// =====================================================================
+// T9 — position pin overrides era: the typist knew del(b) but
+// deliberately typed BEFORE pre-era y. x must land before y with era
+// bit false (no chain crossed) — explicit pins dominate era layering.
+// =====================================================================
+console.log("T9 — pin override beats era knowledge");
+{
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const py = new Doc("9");
+  py.apply(a_up); py.apply(b_up);
+  py.insert(1, "y"); const y_up = py.pop();
+  const pdel = new Doc("5");
+  pdel.apply(a_up); pdel.apply(b_up);
+  pdel.del(1); const bdel = pdel.pop();
+  const px = new Doc("1");
+  [a_up, b_up, y_up, bdel].forEach(u => px.apply(u));
+  px.insert(1, "x"); const x_up = px.pop();
+  expectAll([
+    [a_up, b_up, y_up, bdel, x_up],
+    [a_up, b_up, bdel, y_up, x_up],
+    [a_up, b_up, bdel, x_up, y_up],
+  ], "axy", "T9 pin override");
+}
+
+// =====================================================================
+// T10 — post-era run typed BACKWARD (delete b, then type 9,8,7 always
+// at the gap index) with concurrent pre-era y: the run stays contiguous
+// and after y: "ay789m".
+// =====================================================================
+console.log("T10 — backward post-era run stays contiguous");
+{
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  base.insert(2, "m"); const m_up = base.pop();
+  const p1 = new Doc("1");
+  [a_up, b_up, m_up].forEach(u => p1.apply(u));
+  p1.del(1); const bdel = p1.pop();
+  p1.insert(1, "9"); const u9 = p1.pop();
+  p1.insert(1, "8"); const u8 = p1.pop();
+  p1.insert(1, "7"); const u7 = p1.pop();
+  const py = new Doc("9");
+  py.apply(a_up); py.apply(b_up); py.apply(m_up);
+  py.insert(1, "y"); const y_up = py.pop();
+  expectAll([
+    [a_up, b_up, m_up, bdel, u9, u8, u7, y_up],
+    [a_up, b_up, m_up, y_up, bdel, u9, u8, u7],
+    [a_up, b_up, m_up, bdel, u9, y_up, u8, u7],
+  ], "ay789m", "T10 backward post-era run");
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

@@ -181,10 +181,15 @@ tombstone-inclusive order ≺:
   B appears ≺-earlier than any other element with eraLO = A, then A and B
   are consecutive. *Ghost-slot corollary* (T1 and POINT1-minus-m as one
   clause): for a post-era op B, every element strictly between vLO(B) and
-  B is either a ghost in K(B), or an element X with eraRO(X) ∈ K(B)
-  (content anchored into the crossed slots), or a descendant of such; if
-  the crossed slots contain no pre-era content, vLO(B) and B are
-  consecutive among visible elements.
+  B is one of: (i) a ghost in K(B); (ii) an element X with eraRO(X) ∈
+  K(B) (content anchored into the crossed slots); (iii) a descendant of a
+  (i)- or (ii)-element; or (iv) an element X with eraRO(X) at-or-beyond
+  eraRO(B) in ≺ — pre-era content whose author believed the list ended
+  beyond B's stop, concurrent with B (example: x typed at the end by an
+  author who never saw the chain; B typed after the deletion without
+  seeing x; then x ≺ B with eraRO(x) = eraRO(B) = end). If no element
+  satisfies (i)–(iv), vLO(B) and B are consecutive among visible
+  elements.
 - **(2′) Backward non-interleaving with rebuilt exceptions.** If B =
   eraRO(A) and A is the ≺-latest element with eraRO = B, then A,B are
   consecutive, unless (i) the paper's Lemma-5 exception transplanted to

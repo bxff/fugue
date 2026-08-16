@@ -653,5 +653,35 @@ console.log("SAME-TRANSACTION batches");
   }
 }
 
+// =====================================================================
+// GHOST COROLLARY (iv) — pre-era end-continuation concurrent with the
+// post-era op (found by the independent review). Author who saw only "a"
+// types x at the end (never saw the chain); another author deletes b and
+// types B without having seen x. x may sit strictly between vLO(B)=a and
+// B even though it matches none of the corollary's clauses (i)-(iii);
+// clause (iv) sanctions it (eraRO(x) = end = eraRO(B)). The x-vs-chain
+// order is ID-decided (x and b† are same-era siblings with RO=null):
+// both outcomes are intent-correct — x's author put x at the end, B's
+// author put B after a.
+// =====================================================================
+console.log("GHOST COROLLARY (iv) — end-continuation concurrent with the post-era op");
+for (const [xSender, expected] of [["1", "axB"], ["9", "aBx"]]) {
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const px = new Doc(xSender);
+  px.apply(a_up);
+  px.insert(1, "x"); const x_up = px.pop();   // author never saw b
+  const pB = new Doc("5");
+  pB.apply(a_up); pB.apply(b_up);
+  pB.del(1); const bdel = pB.pop();
+  pB.insert(1, "B"); const B_up = pB.pop();   // author never saw x
+  expectAll([
+    [a_up, b_up, x_up, bdel, B_up],
+    [a_up, b_up, bdel, B_up, x_up],
+    [a_up, b_up, bdel, x_up, B_up],
+  ], expected, `corollary(iv) x=${xSender}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

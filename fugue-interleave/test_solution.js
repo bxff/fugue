@@ -557,5 +557,101 @@ for (const [ySender, expected] of [["9", "apyq"], ["0", "aypq"]]) {
   ], expected, `T1 y=${ySender}`);
 }
 
+// =====================================================================
+// T1′ — the same keystrokes, but the author received y BEFORE the
+// backspace (screen "apyb" → "apy" → "apyq"). Era gives "apyq" again —
+// the sync-invariant fixed point equal to the informed author's own
+// screen. (Canonical flips to "apqy" when y is unseen, i.e., its outcome
+// depends on delivery timing; era's does not.)
+// =====================================================================
+console.log("T1′ — era outcome is the sync-invariant fixed point");
+{
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const py = new Doc("9");
+  py.apply(a_up); py.apply(b_up);
+  py.insert(1, "y"); const y_up = py.pop();
+  const p1 = new Doc("1");
+  p1.apply(a_up); p1.apply(b_up);
+  p1.insert(1, "p"); const p_up = p1.pop();
+  p1.apply(y_up);            // y arrives before the backspace
+  p1.del(3); const bdel = p1.pop();
+  p1.insert(3, "q"); const q_up = p1.pop();
+  expectAll([
+    [a_up, b_up, p_up, y_up, bdel, q_up],
+    [a_up, b_up, y_up, p_up, bdel, q_up],
+  ], "apyq", "T1′ informed author's screen");
+}
+
+// =====================================================================
+// T3/T4 — same-transaction batches. A batch must produce the same tree
+// as the equivalent unbatched sequence, on every replica: the runtime's
+// sender VC entry covers same-transaction predecessors, so the era walk
+// treats them as causally prior.
+// =====================================================================
+console.log("SAME-TRANSACTION batches");
+{
+  class DocBatch {
+    constructor(id) {
+      this.doc = new CRuntime({ debugReplicaID: id });
+      this.ups = [];
+      this.doc.on("Send", (e) => {
+        const u = new Uint8Array(e.message.length + 1);
+        u.set(e.message);
+        u[e.message.length] = 0;
+        this.ups.push(u);
+      });
+      this.arr = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));
+    }
+    batch(fn) { this.doc.transact(fn); }
+    apply(u) { this.doc.receive(u.subarray(0, u.length - 1)); }
+    pop() { return this.ups.shift(); }
+    get val() { return [...this.arr.values()].join(""); }
+  }
+  // T3: delete b and insert c in ONE transaction; concurrent y between a,b.
+  // (One Send event per transaction: the batch's two ops share an envelope.)
+  {
+    const base = new DocBatch("4");
+    base.batch(() => { base.arr.insert(0, "a"); });
+    const a_up = base.pop();
+    base.batch(() => { base.arr.insert(1, "b"); });
+    const b_up = base.pop();
+    const pc = new DocBatch("1");
+    pc.apply(a_up); pc.apply(b_up);
+    pc.batch(() => { pc.arr.delete(1, 1); pc.arr.insert(1, "c"); });
+    const bdelc = pc.pop();
+    const py = new DocBatch("9");
+    py.apply(a_up); py.apply(b_up);
+    py.batch(() => { py.arr.insert(1, "y"); });
+    const y_up = py.pop();
+    expectAll([
+      [a_up, b_up, bdelc, y_up],
+      [a_up, b_up, y_up, bdelc],
+    ], "ayc", "T3 batched delete+insert");
+  }
+  // T4: batched x,y into the dead gap; y typed between a and x must stay
+  // before x ("ayx") via the descendant branch, not the ID tie ("axy").
+  {
+    const base = new DocBatch("4");
+    base.batch(() => { base.arr.insert(0, "a"); });
+    const a_up = base.pop();
+    base.batch(() => { base.arr.insert(1, "b"); });
+    const b_up = base.pop();
+    const pd = new DocBatch("1");
+    pd.apply(a_up); pd.apply(b_up);
+    pd.batch(() => { pd.arr.delete(1, 1); });
+    const bdel = pd.pop();
+    const pb = new DocBatch("9");
+    pb.apply(a_up); pb.apply(b_up); pb.apply(bdel);
+    pb.batch(() => { pb.arr.insert(1, "x"); pb.arr.insert(1, "y"); });
+    const xy_up = pb.pop();
+    expectAll([
+      [a_up, b_up, bdel, xy_up],
+      [a_up, b_up, xy_up, bdel],
+    ], "ayx", "T4 batched inserts into dead gap");
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

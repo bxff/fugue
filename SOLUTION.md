@@ -69,6 +69,9 @@ behavior is byte-identical to FugueMax.
   (azx), left-child collisions (ayzxm), whole-chain nesting (POINT 1),
   stacked eras (ayq), mixed-era siblings with different right origins
   (UWZX), layered knowledge stops, and concurrent double-deletes.
+  *Qualifier (pins dominate):* era ordering applies only between content
+  with no explicit position relation — an author who deliberately pins
+  their content (types before a specific element) keeps that pin (T8/T9).
 - **G4 — Un-edited runs stay contiguous.** Runs typed without an
   intervening edit are never split (forward, backward, and post-era runs;
   "a123789m", "AUVXYZ"). Delete-free scenarios are byte-identical to
@@ -98,6 +101,13 @@ These are deliberate, stated once, and cover all delete geometries:
     does not exist in p's causal past), so within G2 it is provably
     unavoidable. This is not interleaving — it is correct placement of
     slot content.
+  - **T1′ — era is the sync-robust side of the family.** Same keystrokes,
+    but the author received y *before* the backspace (screen "apyb" →
+    "apy" → "apyq"): era gives `apyq` again — the fixed point equal to the
+    informed author's own screen. Canonical gives `apyq` here too, but
+    `apqy` in T1 — so canonical's final document flips on whether y
+    happened to arrive before the backspace; era's does not. On this
+    family, era removes a delivery-timing dependence that canonical has.
 - **O2 — Backward non-interleaving takes an era exception.** Pre-era
   content may be separated from its right origin by post-era content of a
   different right origin (UWZX: x between z and w). This is the rebuilt
@@ -117,17 +127,99 @@ These are deliberate, stated once, and cover all delete geometries:
   correct as-is: same-origin concurrent inserts are ordered by ID because
   no information exists to order them otherwise.
 
-## What remains (proof-level, not design-level)
+## The impossibility proposition — why the price is forced
 
-The revised definition (Def 4′) formalizing G1–G5 and O1–O4, with the
-uniqueness theorem that replaces the paper's Theorem 10: maximal
-non-interleaving under the era-aware definition. The paper's Lemma 8(a)
-does not transfer (walking up from a re-anchored node recovers its anchor,
-not its §5.1 left origin) and needs an eraLO version; the rest of the
-machinery (pre-order traversal of the eraLO-tree, reverse-eraRO forest,
-Theorem 9/10 scheme) is expected to transfer with that replacement. This
-is a proof task, not an implementation task — the algorithm above is the
-complete design.
+**Proposition.** No algorithm satisfying the strong list specification
+guarantees both (A) *continuation adjacency* — an op whose visible left
+origin is ℓ and which is the only element with vLO = ℓ is consecutive with
+ℓ — and (B) *era separation* — pre-era slot content precedes post-era
+continuations — for all sender assignments.
+
+*Proof.* Ops a, b, p (peer 1 into (a,b)), y (peer 9 into (a,b)). Scenario
+A: peer 1 deletes b and types q (vLO = p). Scenario B: peer 9 deletes b
+and types q′ (vLO = y). The op subset {a,b,p,y} is literally identical in
+both scenarios, and a replica holding exactly it occurs in both;
+convergence forces one fixed display order for p,y there, and the strong
+list spec's single global order forbids the relative order of two visible
+elements from ever changing afterward. In A, (B)+(A)+spec (p ≺ q, y ≺ q,
+p adjacent q) force y ≺ p. In B, symmetrically, p ≺ y. Contradiction. ∎
+
+Consequences: canonical ("apqy") and era ("apyq") are the only two
+coherent designs on this family — there is no third. Escape routes are
+closed: tie-breaking with future knowledge is not measurable at
+placement, and revising the p/y order when q arrives violates the strong
+list spec itself (not merely P1) — even a fully re-keyed
+pure-function-of-op-set design would flip the visible order of committed
+characters and exit the Attiya specification. T1 is therefore the boundary
+every algorithm must sit on one side of; era's side is ghost-relative
+intent-correct in every element and is the sync-invariant fixed point
+(T1′), where canonical's side is delivery-timing-dependent.
+
+## Definition 4′ — era-aware maximal non-interleaving (formal specification)
+
+**Era origins** (pure functions of an op's causal past; the delivery walk
+computes exactly these, established by the eragen/erarecv differential
+fuzz). For insert o with author view V(o): vLO(o) = visible predecessor;
+cRO(o) = successor of vLO(o) in V(o)'s tombstone-inclusive order. The
+known-dead chain K(o) = the maximal run t₁ = cRO(o), t₂, … of consecutive
+elements of V(o)'s full order such that some delete of each tᵢ is in
+past(o). Then **eraLO(o)** = t_k if k ≥ 1 else vLO(o); **eraRO(o)** = the
+successor of eraLO(o) in V(o)'s full order (first element not
+known-deleted; *end* if none); era bit e(o) = [k ≥ 1].
+
+Facts: (F1) at insertion, eraLO(o) and o are consecutive in V(o)'s full
+order, and o ≺ eraRO(o); (F2) *causal monotonicity*: any op with o in its
+past also knows every delete in K(o) — era layering never runs backwards;
+(F3) same-(eraLO, eraRO) ops are pairwise concurrent, which makes the pin
+qualifier a theorem: pinned pairs never share a class, and explicitly
+pinned ops get e = 0 or route into the pinned node's subtree.
+
+**The definition.** Strong list specification, plus, in the
+tombstone-inclusive order ≺:
+
+- **(1′) Forward non-interleaving over era origins.** If A = eraLO(B) and
+  B appears ≺-earlier than any other element with eraLO = A, then A and B
+  are consecutive. *Ghost-slot corollary* (T1 and POINT1-minus-m as one
+  clause): for a post-era op B, every element strictly between vLO(B) and
+  B is either a ghost in K(B), or an element X with eraRO(X) ∈ K(B)
+  (content anchored into the crossed slots), or a descendant of such; if
+  the crossed slots contain no pre-era content, vLO(B) and B are
+  consecutive among visible elements.
+- **(2′) Backward non-interleaving with rebuilt exceptions.** If B =
+  eraRO(A) and A is the ≺-latest element with eraRO = B, then A,B are
+  consecutive, unless (i) the paper's Lemma-5 exception transplanted to
+  era origins, or (ii) *era intrusion*: a post-era element with the same
+  eraLO as A but larger stop separates them (UWZX's x between z and w).
+  Proving (i)–(ii) exhaustive is the Lemma-5-analog obligation.
+- **(3′) Sibling axiom.** Among elements with the same eraLO that are
+  unordered by (1′)/(2′): pre-era (e = 0) precede post-era (e = 1); within
+  the same era bit, roots of the eraRO forest in reverse-eraRO order;
+  remaining ties by full ID. Era separation is an axiom, exactly as the
+  paper's condition (3) was — it is not derivable from (1′)+(2′).
+
+**Constructive characterization** (what the implementation computes): (1)
+pre-order of the eraLO-tree; (2) same-eraLO elements by post-order of the
+eraRO forest (X child of Y iff eraRO(X) = Y within the group) — realized
+by the descendant branch, which routes pinned post-era ops into the stop
+node's left-descendant chain so the flat comparator only ever compares
+pin-free pairs; (3) forest roots: era bit, then reverse-eraRO, then full
+ID.
+
+**Proof roadmap.** Transfers essentially verbatim: the strong-list-spec
+theorem (the walk stops before the first known-alive node, so placement
+stays inside the visible gap); convergence (causal-past purity); Lemma 3
+with eraLO; the roots-pairwise-concurrent lemma. Needs genuine re-proof:
+Lemma 7's forward direction (its step "D is not causally later than A" is
+false for eraLO-siblings — T8's x1 is causally later than its sibling m;
+replacement: causally-related same-eraLO elements are always
+eraRO-forest-pinned, so post-order handles them and only roots need the
+concurrency argument); Lemma 8(a) in eraLO form (walk up to the first
+right-child link; its parent is the anchor — true by construction,
+including through left-descendant chains); Lemma 8(b) correspondence;
+Theorem 9 (existence) assembled from these; Theorem 10 (uniqueness) via
+the paper's scheme given (3′) as the explicit new axiom.
+
+## Why the earlier alternatives failed (recorded for the correspondence)
 
 ## Why the earlier alternatives failed (recorded for the correspondence)
 

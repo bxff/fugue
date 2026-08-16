@@ -529,5 +529,33 @@ console.log("PAYLOAD SYNCHRONY — ops independent of delete-sync state");
   }
 }
 
+// =====================================================================
+// T1 — concurrent slot content lands in the deleted slot (intended
+// semantics, not interleaving). Author types p between a,b, backspaces b,
+// types q; concurrent y typed between a,b. With b visible the intent
+// order is p y b q, so the final order must be "apyq" (y in b's slot,
+// between p and q) or "aypq" — p vs y is a genuine same-knowledge tie
+// decided by ID; the y-before-q part is deterministic era separation.
+// =====================================================================
+console.log("T1 — slot content occupies the deleted slot");
+for (const [ySender, expected] of [["9", "apyq"], ["0", "aypq"]]) {
+  const base = new Doc("4");
+  base.insert(0, "a"); const a_up = base.pop();
+  base.insert(1, "b"); const b_up = base.pop();
+  const p1 = new Doc("1");
+  p1.apply(a_up); p1.apply(b_up);
+  p1.insert(1, "p"); const p_up = p1.pop();
+  p1.del(2); const bdel = p1.pop();
+  p1.insert(2, "q"); const q_up = p1.pop();
+  const py = new Doc(ySender);
+  py.apply(a_up); py.apply(b_up);
+  py.insert(1, "y"); const y_up = py.pop();
+  expectAll([
+    [a_up, b_up, p_up, bdel, q_up, y_up],
+    [a_up, b_up, y_up, p_up, bdel, q_up],
+    [a_up, b_up, p_up, y_up, bdel, q_up],
+  ], expected, `T1 y=${ySender}`);
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail > 0 ? 1 : 0);

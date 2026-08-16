@@ -1,125 +1,146 @@
-# Solving Phantom Barriers: Receiver-Side Era Derivation
+# Fugue-Era: the complete semantics of the tombstone-safe FugueMax
 
-This documents the complete solution to the tombstone / phantom-barrier
-problems, verified 2026-08-16 against the full scenario suite
-(`fugue-interleave/test_solution.js`, 20 scenarios, all delivery
+This is the complete specification of the design implemented in
+`fugue-max-simple/src/index.ts`. It is intended to be self-contained: one
+principle, one set of rules, one complete list of what the design gives and
+what it deliberately overrides. All claims are pinned by
+`fugue-interleave/test_solution.js` (23 scenarios, all delivery
 permutations, both sender assignments).
 
-## The problem, precisely
+## The one principle
 
-Tombstones must be invisible to the *user* but must not act as ordering
-barriers. Two requirements:
+**The document order is the order the authors believed they were writing
+in.** Each insert lands after everything its author knew was deleted and
+before everything its author believed alive. Where two authors had
+identical knowledge, a deterministic tie-break decides. A delete only
+toggles visibility — it never moves anything and never changes any insert's
+op. This extends FugueMax's intent-preserving placement from the visible
+list to the tombstone-inclusive list.
 
-**P1 — Stability.** The total order over all nodes (alive and dead) is
-determined by insert operations alone. A delete only toggles visibility.
-Nothing ever moves, no origin is ever rewritten, nothing is recomputed when
-a delete arrives. (The old delete-time RO-shifting fix violated this and was
-removed.)
+## The algorithm
 
-**P2 — Era separation.** Content written *knowing* a deletion must
-deterministically follow content anchored to the deleted element while it
-was alive — for every sender assignment and every merge order, in every
-geometry (same-origin ties, runs, chains, stacked eras, and mixed-era
-siblings with different right origins). A tombstone must not turn "typed
-after the deletion" into an ID tie with "typed before the deletion".
+**Generation — canonical FugueMax, unchanged.** The insert op carries
+exactly the paper's payload: `(id, value, parent, side, rightOrigin)` with
+tombstone-inclusive origins. Consequently the op bytes are independent of
+which deletes the generator had synced (verified by the PAYLOAD SYNCHRONY
+test: four ops generated from different sync states and operation
+orderings are byte-identical). Deletes do not perturb the op graph of
+inserts at all.
 
-**P3 — Payload synchrony.** The insert op's bytes (parent, side,
-rightOrigin) must not depend on which deletes the generator had synced.
-This is the property canonical FugueMax has that a generation-time era
-encoding destroys: with tombstone-inclusive origins, the op references the
-same node whether it is alive or deleted. Era information therefore must
-not be baked into the op.
+**Delivery — derive the author's view from the op graph.** Each insert
+records its causal dot (transaction counter); each delete records its
+(sender, transaction counter) on the node. When an insert arrives, walk
+right from its canonical next node:
 
-## The design
+1. cross every tombstone whose *delete* is in the op's causal past (the
+   author knew it deleted) — it becomes the era anchor;
+2. stop at the first node whose *insert* is in the causal past and whose
+   deletion is not (the author believed it alive) — the era-RO;
+3. skip anything concurrent (the author never saw it).
 
-**Generation: canonical FugueMax, unchanged.** The insert generator computes
-leftOrigin and the tombstone-inclusive rightOrigin exactly as in the paper's
-Algorithm 1. Payloads are byte-identical whether or not the deleting
-messages have arrived (verified by the PAYLOAD SYNCHRONY test: four ops from
-different sync states and operation orderings have identical payloads).
+Then: no tombstone crossed → keep the canonical placement. Otherwise anchor
+after the whole known-dead chain — a right child of the anchor with the
+era-RO as right origin, or a left child of the era-RO when the era-RO is a
+descendant of the anchor (the anchor had right children in the author's
+view). Every decision reads only the op's causal past, so the placement is
+fixed the moment the op is placed — concurrent ops arriving later can
+never move it. Convergence is by construction; the tree is a pure function
+of the op set.
 
-**Delivery: derive the era placement from the op graph.** When an insert op
-arrives, reconstruct the generator's view from causal metadata:
+**Siblings — era class first, then reverse right origin, then
+(sender, counter).** Pre-deletion content precedes post-deletion content.
+Era must dominate reverse-RO: a post-era sibling's right origin can lie
+beyond a pre-era sibling's (UWZX), and the era principle must win.
+Same-era siblings keep the paper's reverse-RO/ID rules, so delete-free
+behavior is byte-identical to FugueMax.
 
-1. Walk right from the op's canonical (tombstone-inclusive) next node.
-   For each node `t` on the walk:
-   - if `t` is deleted and some delete of `t` is in the op's causal past
-     (`VC_op(deleter) ≥ delete's transaction counter`) — the generator knew
-     it deleted — **cross it** (it becomes the anchor);
-   - else if `t`'s insert dot is in the op's causal past — the generator's
-     alive next — **stop**;
-   - else `t` is a concurrent node the generator never saw — **skip it**.
-2. No crossing → keep the canonical placement.
-   Otherwise anchor after the whole known-dead chain:
-   - if the stop node is a descendant of the anchor (the anchor had right
-     children in the generator's view) → the new node becomes a **left
-     child of the stop node** (the generator's next);
-   - else → a **right child of the anchor**, with the stop node as its
-     rightOrigin (null at the end).
+## The guarantees (pinned by the suite)
 
-Causal-past filtering is what makes this delivery-order independent: a
-node's anchor depends only on ops causally before it, so concurrent ops
-arriving later never move it. Placement is a pure function of the op set —
-convergence by construction. The stop node's ancestry is fixed by the op's
-causal past, so the left-child branch is also delivery-order independent.
+- **G1 — Intent preservation (strong list spec).** Every insert lands
+  between its generation-time visible neighbors. An author's explicit
+  position always wins over era layering (the pin test: typing *before*
+  pre-era content stays before it).
+- **G2 — Stability.** Deletes toggle visibility only. No origin is ever
+  rewritten, nothing is restructured on delete, and the order is a pure
+  function of the op graph.
+- **G3 — Era separation.** For two inserts into the same region, the author
+  who knew a deletion lands after the one who didn't — deterministically,
+  in every geometry: same-origin ties (AYC), right-side continuations
+  (azx), left-child collisions (ayzxm), whole-chain nesting (POINT 1),
+  stacked eras (ayq), mixed-era siblings with different right origins
+  (UWZX), layered knowledge stops, and concurrent double-deletes.
+- **G4 — Un-edited runs stay contiguous.** Runs typed without an
+  intervening edit are never split (forward, backward, and post-era runs;
+  "a123789m", "AUVXYZ"). Delete-free scenarios are byte-identical to
+  canonical FugueMax.
+- **G5 — Determinism where knowledge differs.** Every ordering decided by
+  knowledge is independent of sender IDs and merge order — including
+  geometries where canonical is sender-dependent (layered stops,
+  double-deletes).
 
-**Sibling ordering: era first, then reverse right origin, then ID.**
-A one-bit era ("crossed a known tombstone") distinguishes pre-deletion from
-post-deletion siblings; pre comes first. Era must dominate reverse-RO: a
-post-era sibling's rightOrigin can lie beyond a pre-era sibling's
-rightOrigin (the UWZX scenario — a concurrent insert inside the dead gap),
-and the era principle must win. Same-era siblings keep the paper's
-reverse-RO/ID rules, so no-deletion behavior is byte-identical to FugueMax
-(Figure 7).
+## The overrides — the complete list of departures from the paper's Definition 4
 
-## Causal metadata plumbing
+These are deliberate, stated once, and cover all delete geometries:
 
-- Each insert records its transaction counter (`meta.senderCounter`) as its
-  causal dot; each delete records its (sender, transaction counter) on the
-  node. Both are accessed during the local echo, which makes the collabs
-  runtime transmit them to remote replicas.
-- The insert generator requests vector-clock entries for the deleters of
-  the tombstones its local walk crosses, plus the inserter of its alive
-  next. Unrequested entries read 0, which automatically makes concurrent
-  nodes "skip" during the receiver's walk — no bookkeeping of what is
-  concurrent is needed.
-- The derived placement (parent/side/rightOrigin/era) is saved, since
-  saved state carries no per-op vector clocks; after load, later ops' walks
-  use the saved causal dots.
+- **O1 — Forward non-interleaving yields to era separation.** When
+  pre-era content occupies a dead slot, it may sit between a post-era
+  continuation and its visible left origin. Two faces of one condition:
+  - POINT1-minus-m: `n` typed after deleting b,d → `aywn` (w, anchored in
+    the chain while alive, sits between y and n).
+  - **T1**: shared "ab"; author types p between a,b, backspaces b, types q;
+    concurrent y typed between a,b. Result: `apyq` when p's ID sorts after
+    y's, `aypq` otherwise. With b visible the intent order is `p y b q` —
+    every element sits exactly where its author put it relative to b's
+    tombstone; y correctly occupies the deleted slot. Canonical's `apqy`
+    misplaces q before b's tombstone. The visual adjacency of p,q is
+    ID-decided only because p vs y is a genuine same-knowledge tie; a
+    deterministic y-before-p is impossible without future knowledge (q
+    does not exist in p's causal past), so within G2 it is provably
+    unavoidable. This is not interleaving — it is correct placement of
+    slot content.
+- **O2 — Backward non-interleaving takes an era exception.** Pre-era
+  content may be separated from its right origin by post-era content of a
+  different right origin (UWZX: x between z and w). This is the rebuilt
+  Lemma 5 exception: it fires exactly when the intervening element is
+  post-era of a deletion the separated element's author never saw.
+- **O3 — Same-origin ties are era-ordered, not ID-ordered.** The paper's
+  condition (3) is replaced by era class first; ID remains only within a
+  class. This is the entire fix to the phantom barrier and the only change
+  relative to the paper in tie-breaking.
+- **O4 — Order 1 vs Order 2 diverge by causal knowledge.** Typing c while b
+  is alive and then deleting b (Order 1) is a different op graph than
+  deleting b and then typing c (Order 2): Order 1's c ties with concurrent
+  y by ID (same knowledge); Order 2's c deterministically follows y. This
+  split is inherent to any era-faithful design and is required by the AYC
+  determinism itself.
+- No delete-free behavior changes. bdac (Point 3) is untouched and
+  correct as-is: same-origin concurrent inserts are ordered by ID because
+  no information exists to order them otherwise.
 
-## Scenario results (all merge orders, all sender assignments)
+## What remains (proof-level, not design-level)
 
-| Scenario | Result |
-|---|---|
-| Point 1: y keeps "…" as RO; post-deletion insert n | `a y m b† w† d† n` — "aymwn", deterministic |
-| Point 1 minus m (forward-NI vs era trade) | **aywn** — era wins, explicitly |
-| AYC (Order 2: delete b, insert c) vs concurrent y | **ayc** always |
-| AYC Order 1 (insert c, delete b) vs concurrent y | sender tie (same knowledge), convergent |
-| Right-side era: z after alive-u vs x after delete(u) | **azx** always |
-| Left-child era (`a t u m`, the collision case) | **ayzxm** always |
-| Phantom barrier, runs on both eras | **AUVXYZ**, runs contiguous |
-| Stacked eras (delete, type, delete, type) | nest in order: `a b† p† q` — "ayq" |
-| UWZX (mixed-era siblings, different ROs) | **zxwe** — era-first, sync-robust (S7) |
-| Figure 7 (no tombstones) | **AXYBC** — unchanged |
-| Payload synchrony | identical op bytes across sync states & orderings |
+The revised definition (Def 4′) formalizing G1–G5 and O1–O4, with the
+uniqueness theorem that replaces the paper's Theorem 10: maximal
+non-interleaving under the era-aware definition. The paper's Lemma 8(a)
+does not transfer (walking up from a re-anchored node recovers its anchor,
+not its §5.1 left origin) and needs an eraLO version; the rest of the
+machinery (pre-order traversal of the eraLO-tree, reverse-eraRO forest,
+Theorem 9/10 scheme) is expected to transfer with that replacement. This
+is a proof task, not an implementation task — the algorithm above is the
+complete design.
 
-## What this gives up (stated, not hidden)
+## Why the earlier alternatives failed (recorded for the correspondence)
 
-- **Definition 4 of the paper is revised, not implemented.** Era ordering
-  deliberately overrides condition (3)'s ID tie-break (AYC), condition (2)
-  (azx, ayzxm — the paper forces post-deletion-before-pre-deletion there),
-  and condition (1) in the POINT1-minus-m geometry (aywn). Theorem 10's
-  uniqueness therefore does not transfer; maximal non-interleaving holds
-  under the revised (era-aware) definition. The paper's own §5.1 concedes
-  the tombstone-inclusive right origin was chosen because it "simplifies
-  the analysis by letting us ignore deletions" — not because the resulting
-  delete-adjacent orderings are desirable.
-- **Sync-state behavior splits by causal knowledge, not by bytes.** An op's
-  placement depends on its causal past (whether the generator knew the
-  deletion), which is part of the op graph in the op-based CRDT formalism.
-  The bytes, however, are sync-independent (P3), so variant classes are a
-  function of the op graph alone.
-
-Point 3 (bdac) is untouched and out of scope: it involves no deletions, and
-the ID-mandated order of same-origin siblings is correct behavior — a CRDT
-cannot know which ops a peer had seen.
+- **Canonical FugueMax** cannot see the knowledge difference (tombstone-
+  inclusive RO makes both eras byte-identical ops), so it ID-ties them:
+  phantom barrier (`acy`, `aqy`, `AXYZUV`), and in right-side geometries
+  Definition 4 actively forces post-before-pre (`axz`, `axyzm`).
+- **"RO = next live element"** erases the chain position that encodes
+  intent: it fixes none of the tie geometries (the left-child branch never
+  consults RO) and makes the same keystroke produce different trees by
+  operation order (`aymc` vs `aycm`).
+- **Generation-time era anchoring** (the previous iteration of this fix)
+  encodes the right rule but in the op, making payload bytes depend on
+  delete-sync state (violating G4/payload synchrony), and its RO-first
+  comparator lets reverse-RO override the era principle (UWZX `xzwe`) with
+  a sync-dependent flip.

@@ -11,8 +11,6 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { corpusAuditCounts, corpusAuditSections } from "./corpus_audit.js";
-import { auditVisualAliases, sourceReviewCases } from "./source_case_visuals.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -52,7 +50,6 @@ function runSuite(implementation) {
     const stdout = execFileSync(process.execPath, [
       testFile,
       "--json",
-      "--include-excluded",
       "--module",
       implementation.module,
     ], { cwd: here, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
@@ -777,7 +774,6 @@ function renderIndex(animationVersion) {
     [["N7"], "Naive-fix regression"],
     [["S1", "S2"], "Deletion stability"],
     [["C1", "C2", "C3", "C4"], "Structural controls"],
-    [["N6"], "Excluded after review"],
   ];
   const semanticNavigation = semanticGroups.map(([ids, label]) => {
     const items = ids.map((id) => reviewCases.find((test) => test.id === id)).filter(Boolean).map((test) => {
@@ -790,90 +786,21 @@ function renderIndex(animationVersion) {
     return `<section class="nav-group"><h2>${label}</h2>${items}</section>`;
   }).filter((section) => !section.includes("</h2></section>")).join("");
 
-  const sourceGroups = [
-    [["I7", "I8", "I9", "I10", "I11"], "Original legacy traces"],
-    [["E01", "E08", "E10", "E11", "E13", "E17", "E19", "E21", "E24", "E30", "E32"], "Unreduced Era proposals"],
-  ];
-  const sourceNavigation = sourceGroups.map(([ids, label]) => {
-    const items = ids.map((id) => sourceReviewCases.find((test) => test.id === id)).filter(Boolean).map((test) =>
-      `<a href="#${test.id}" data-case="${test.id}" class="${escapeXml(test.decision)} source-case"><b>${escapeXml(test.id)}</b><span>${escapeXml(test.name)}</span><em><i class="source-mark" title="${escapeXml(test.evidence)}">○</i></em></a>`
-    ).join("");
-    return `<section class="nav-group source-nav"><h2>${escapeXml(label)}</h2>${items}</section>`;
-  }).join("");
-  const navigation = semanticNavigation + sourceNavigation;
-  const matrixHeader = reviewCases.map((test) => `<th class="${test.decision}"><a href="#${test.id}" data-case="${test.id}" title="${escapeXml(test.decision === "retained" ? test.role : `excluded: ${test.rationale}`)}">${test.id}</a></th>`).join("");
+  const navigation = semanticNavigation;
+  const matrixHeader = reviewCases.map((test) => `<th><a href="#${test.id}" data-case="${test.id}" title="${escapeXml(test.role)}">${test.id}</a></th>`).join("");
   const matrixRows = reports.map((implementation) => {
     const cells = reviewCases.map((test) => {
       const pass = resultFor(implementation, test.id).pass;
-      return `<td class="${pass ? "pass" : "fail"} ${test.decision}" title="${escapeXml(test.id)}: ${pass ? "pass" : "fail"}${test.decision === "excluded" ? " (excluded candidate)" : ""}">${pass ? "✓" : "×"}</td>`;
+      return `<td class="${pass ? "pass" : "fail"}" title="${escapeXml(test.id)}: ${pass ? "pass" : "fail"}">${pass ? "✓" : "×"}</td>`;
     }).join("");
-    const retained = reviewCases.filter((test) => test.decision === "retained");
-    const passed = retained.filter((test) => resultFor(implementation, test.id).pass).length;
-    return `<tr><th>${escapeXml(implementation.label)} <small>${passed}/${retained.length}</small></th>${cells}</tr>`;
+    const passed = reviewCases.filter((test) => resultFor(implementation, test.id).pass).length;
+    return `<tr><th>${escapeXml(implementation.label)} <small>${passed}/${reviewCases.length}</small></th>${cells}</tr>`;
   }).join("");
   const executableCaseData = Object.fromEntries(reviewCases.map((test) => [
     test.id,
     animatedCaseData(test),
   ]));
-  const sourceCaseData = Object.fromEntries(sourceReviewCases.map((test) => [test.id, test]));
-  const baseCaseData = { ...executableCaseData, ...sourceCaseData };
-  const reviewIDs = new Set(reviewCases.map((test) => test.id));
-  const linkCaseRefs = (value) => escapeXml(value).replace(/\b(?:N\d+|S\d+|C\d+)\b/g, (id) =>
-    reviewIDs.has(id) ? `<a href="#${id}" data-case="${id}" aria-label="Open ${id}">${id}</a>` : id
-  );
-  const auditCaseData = {};
-  const visualEvidenceCounts = { exact: 0, linked: 0, metadata: 0 };
-  const auditSections = corpusAuditSections.map((section, sectionIndex) => {
-    const rows = section.rows.map((item, rowIndex) => {
-      const key = `SRC-${sectionIndex + 1}-${rowIndex + 1}-${String(item.id).replace(/[^A-Za-z0-9]+/g, "-")}`;
-      const targetKey = auditVisualAliases[item.id] ?? (baseCaseData[item.id] ? item.id : null);
-      const target = targetKey ? baseCaseData[targetKey] : null;
-      const direct = targetKey === item.id;
-      const evidence = target
-        ? direct
-          ? target.evidence ?? "exact source graph"
-          : `linked comparison graph ${targetKey}; original source topology still needs side-by-side verification`
-        : "metadata only; original operation trace is not reconstructed";
-      if (direct) visualEvidenceCounts.exact += 1;
-      else if (target) visualEvidenceCounts.linked += 1;
-      else visualEvidenceCounts.metadata += 1;
-      auditCaseData[key] = {
-        id: item.id,
-        name: item.name,
-        property: `${section.source} · source audit`,
-        role: "source-ledger row",
-        decision: item.disposition,
-        evidence,
-        rationale: `Proposed relation: ${item.relation}. ${item.reason}`,
-        question: `Is it valid to classify this original source case as ${item.disposition}?`,
-        catches: `Recorded published outcome: ${item.published}.`,
-        required: target
-          ? `Inspect the linked ${targetKey} graph, then compare it with the original source assertion before accepting this reduction.`
-          : "No reduction is accepted from this metadata-only view; reconstruct the original operations first.",
-        worlds: target?.worlds ?? [{
-          title: "Original operation trace not reconstructed",
-          annotation: `${section.source} · ${item.id}`,
-          source: [String(item.id)],
-          branches: [{ actor: "?", view: ["?"], from: [String(item.id)], origin: item.name }],
-          results: [{ label: "Audit", value: "?", pass: false, status: "UNVERIFIED", highlight: null }],
-        }],
-      };
-      return `<tr class="audit-${escapeXml(item.disposition)}">
-      <th>${escapeXml(item.id)} · ${escapeXml(item.name)}</th>
-      <td>${escapeXml(item.published)}</td>
-      <td><span class="audit-status">${escapeXml(item.disposition)}</span></td>
-      <td>${linkCaseRefs(item.relation)}</td>
-      <td>${escapeXml(item.reason)}</td>
-      <td><a href="#${key}" data-case="${key}" class="inspect-source">inspect</a><small>${escapeXml(evidence)}</small></td>
-    </tr>`;
-    }).join("");
-    return `<details class="audit-source">
-      <summary><b>${escapeXml(section.source)}</b><span>${section.rows.length} cases</span></summary>
-      <p>${escapeXml(section.note)}</p>
-      <div class="source-map-table-wrap"><table class="audit-table"><thead><tr><th>Source case</th><th>Published</th><th>Disposition</th><th>Proposed relation</th><th>Reduction argument</th><th>Visual evidence</th></tr></thead><tbody>${rows}</tbody></table></div>
-    </details>`;
-  }).join("");
-  const caseData = JSON.stringify({ ...baseCaseData, ...auditCaseData }).replaceAll("</", "<\\/");
+  const caseData = JSON.stringify(executableCaseData).replaceAll("</", "<\\/");
   const first = reviewCases[0];
   return `<!doctype html>
 <html lang="en">
@@ -900,7 +827,6 @@ function renderIndex(animationVersion) {
     .matrix th, .matrix td { height: 26px; padding: 0; text-align: center; font-size: 12px; }
     .matrix thead th:first-child, .matrix tbody th { width: 210px; text-align: left; }
     .matrix thead a { color: #555; text-decoration: none; }
-    .matrix .excluded { opacity: .42; }
     .matrix tbody th { font-weight: 600; white-space: nowrap; }
     .matrix small { color: #888; font-weight: 400; }
     .matrix td { color: white; font-weight: 700; }
@@ -911,12 +837,6 @@ function renderIndex(animationVersion) {
     .nav-group a { display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 7px; align-items: start; padding: 7px 4px; border-top: 1px solid #e3e3e0; text-decoration: none; }
     .nav-group a:last-child { border-bottom: 1px solid #e3e3e0; }
     .nav-group a:hover, .nav-group a[aria-current="true"] { background: #f1f1ee; }
-    .nav-group a.excluded { opacity: .62; }
-    .nav-group a.excluded[aria-current="true"] { opacity: 1; background: #fff3d6; }
-    .nav-group a.disputed[aria-current="true"] { background: #fff3d6; }
-    .nav-group a.outside[aria-current="true"] { background: #eef3f6; }
-    .nav-group.source-nav { padding-top: 3px; border-top: 2px solid #d9d9d5; }
-    .source-mark { color: #777; font-style: normal; font-size: 14px; line-height: 8px; }
     .nav-group b { color: #555; font-size: 12px; }
     .nav-group span { font-size: 12px; line-height: 1.25; }
     .nav-group em { display: flex; gap: 4px; padding-top: 3px; }
@@ -926,11 +846,6 @@ function renderIndex(animationVersion) {
     .viewer-head h2 { margin: 0; font-size: 18px; font-weight: 600; }
     .viewer-head .case-question { margin-top: 5px; max-width: 850px; color: #666; font-size: 13px; font-weight: 400; line-height: 1.35; letter-spacing: 0; text-transform: none; }
     .decision-note { margin: 9px 0 0; border-left: 3px solid #2ba66a; padding: 6px 9px; max-width: 1000px; color: #555; background: #f3f7f4; font-size: 12px; line-height: 1.4; }
-    .decision-note.excluded { border-left-color: #d39b2a; background: #fff7e5; }
-    .decision-note.disputed, .decision-note.provisional { border-left-color: #d39b2a; background: #fff7e5; }
-    .decision-note.outside { border-left-color: #7692a3; background: #f0f5f7; }
-    .decision-note.missing { border-left-color: #d14238; background: #fff0ee; }
-    .decision-note.represented, .decision-note.control, .decision-note.main { border-left-color: #888; background: #f4f4f1; }
     .decision-note b { color: #333; text-transform: capitalize; }
     .case-evidence { margin: 5px 0 0; color: #777; font-size: 11px; line-height: 1.35; }
     .case-evidence b { color: #555; text-transform: uppercase; letter-spacing: .05em; }
@@ -946,33 +861,6 @@ function renderIndex(animationVersion) {
     .case-notes p { margin: 0; font-size: 14px; line-height: 1.45; }
     .case-notes span { display: block; margin-bottom: 3px; color: #777; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
     #case-required { font-weight: 650; }
-    .source-map { min-width: 0; max-width: 100%; margin-top: 18px; overflow: hidden; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
-    .source-map summary { padding: 10px 2px; color: #555; cursor: pointer; font-size: 13px; font-weight: 650; }
-    .source-map p { margin: 0 2px 10px; color: #666; font-size: 12px; line-height: 1.45; }
-    .source-map-table-wrap { width: 100%; max-width: 100%; overflow-x: auto; padding-bottom: 12px; }
-    .source-map table { width: 100%; min-width: 780px; border-collapse: collapse; table-layout: fixed; }
-    .source-map th, .source-map td { border-top: 1px solid #e7e7e4; padding: 7px 8px; text-align: left; vertical-align: top; font-size: 12px; line-height: 1.4; }
-    .source-map th { width: 265px; font-weight: 600; }
-    .source-map td:nth-child(2) { width: 105px; }
-    .source-map a { font-weight: 700; }
-    .audit-summary { margin: 0 2px 12px; padding: 10px 12px; background: #f4f4f1; color: #444; font-size: 13px; line-height: 1.5; }
-    .audit-summary b { color: #222; }
-    .audit-source { min-width: 0; max-width: 100%; border-top: 1px solid #e4e4e0; }
-    .audit-source > summary { display: flex; justify-content: space-between; gap: 18px; padding: 9px 8px; font-size: 13px; cursor: pointer; }
-    .audit-source > summary span { flex: none; color: #888; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
-    .audit-source > p { padding: 0 8px 8px; margin: 0; }
-    .audit-table { min-width: 1320px !important; }
-    .audit-table th:first-child { width: 245px; }
-    .audit-table th:nth-child(2) { width: 115px; }
-    .audit-table th:nth-child(3) { width: 95px; }
-    .audit-table th:nth-child(4) { width: 140px; }
-    .audit-table th:nth-child(5) { width: 410px; }
-    .audit-table th:nth-child(6) { width: auto; }
-    .audit-status { display: inline-block; padding: 2px 6px; border: 1px solid #ccc; border-radius: 999px; font-size: 10px; text-transform: uppercase; letter-spacing: .045em; }
-    .inspect-source { display: block; width: fit-content; margin-bottom: 3px; font-weight: 700; }
-    .audit-table small { display: block; color: #888; font-size: 10.5px; line-height: 1.35; }
-    .audit-missing { background: #fff5db; }
-    .audit-disputed { background: #fbf4e8; }
     @media (max-width: 900px) {
       .masthead { grid-template-columns: 1fr; padding: 22px 18px 18px; }
       .masthead > * { min-width: 0; }
@@ -989,7 +877,7 @@ function renderIndex(animationVersion) {
 <body>
   <header class="masthead">
     <h1>Tombstone invariance review</h1>
-    <div class="legend"><span><i class="dot pass"></i> retained property holds</span><span><i class="dot fail"></i> retained property fails</span><span style="color:#b47c0c">● proposal</span><span style="color:#377fcc">● comparison</span></div>
+    <div class="legend"><span><i class="dot pass"></i> property holds</span><span><i class="dot fail"></i> property fails</span></div>
   </header>
   <main>
     <div class="matrix-wrap">
@@ -1013,11 +901,6 @@ function renderIndex(animationVersion) {
         </div>
       </section>
     </div>
-    <details class="source-map">
-      <summary>Complete source-case accounting</summary>
-      <p class="audit-summary"><b>${corpusAuditCounts.rows} source rows from ${corpusAuditCounts.sources} sources are listed; none is silently pruned.</b> The page contains 13 semantic candidates plus ${sourceReviewCases.length} separately reconstructed historical traces. In the ledger, ${visualEvidenceCounts.exact} rows open their exact graph, ${visualEvidenceCounts.linked} open a proposed comparison graph whose reduction still needs review, and ${visualEvidenceCounts.metadata} open an explicit metadata-only <b>unverified</b> view. “Represented” means a proposed reduction, not an accepted proof of equivalence. Missing raw traces remain gaps.</p>
-      ${auditSections}
-    </details>
   </main>
   <script src="graph-animation.js?v=${animationVersion}"></script>
   <script>

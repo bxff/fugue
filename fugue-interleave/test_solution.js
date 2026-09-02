@@ -1,18 +1,5 @@
 import { CRuntime } from "@collabs/collabs";
-
-// Default: current implementation. For an audit of the published algorithm:
-//   node test_solution.js --module fugue-max-canonical --report-only
-const args = process.argv.slice(2);
-const option = (name, fallback) => {
-  const index = args.indexOf(name);
-  return index === -1 ? fallback : args[index + 1];
-};
-const moduleArg = option("--module", "fugue-max-simple");
-const exportName = option("--export", "FugueMaxSimple");
-const reportOnly = args.includes("--report-only");
-const implementationModule = await import(moduleArg);
-const ListClass = implementationModule[exportName];
-if (ListClass === undefined) throw new Error(`Module ${moduleArg} has no export named ${exportName}`);
+import { FugueMaxSimple } from "fugue-max-simple";
 
 class Doc {
   constructor(id) {
@@ -24,7 +11,7 @@ class Doc {
       u[e.message.length] = 0;
       this.ups.push(u);
     });
-    this.arr = this.doc.registerCollab("array", (init) => new ListClass(init));
+    this.arr = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));
   }
   insert(idx, val) { this.doc.transact(() => this.arr.insert(idx, val)); }
   del(idx) { this.doc.transact(() => this.arr.delete(idx, 1)); }
@@ -505,7 +492,7 @@ console.log("PAYLOAD SYNCHRONY — ops independent of delete-sync state");
           this.sent.push(JSON.parse(text.slice(idx, end)));
         }
       });
-      this.arr = this.doc.registerCollab("array", (init) => new ListClass(init));
+      this.arr = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));
     }
     insert(idx, val) { this.doc.transact(() => this.arr.insert(idx, val)); }
     del(idx) { this.doc.transact(() => this.arr.delete(idx, 1)); }
@@ -615,7 +602,7 @@ console.log("SAME-TRANSACTION batches");
         u[e.message.length] = 0;
         this.ups.push(u);
       });
-      this.arr = this.doc.registerCollab("array", (init) => new ListClass(init));
+      this.arr = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));
     }
     batch(fn) { this.doc.transact(fn); }
     apply(u) { this.doc.receive(u.subarray(0, u.length - 1)); }
@@ -821,4 +808,4 @@ console.log("T10 — backward post-era run stays contiguous");
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail > 0 && !reportOnly ? 1 : 0);
+process.exit(fail > 0 ? 1 : 0);

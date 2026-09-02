@@ -6,8 +6,6 @@
     "type": "module",
     "scripts": {
         "diagrams:tombstones": "node generate_tombstone_diagrams.js",
-        "test:solution": "node test_solution.js",
-        "test:solution:published:report": "node test_solution.js --module fugue-max-canonical --report-only",
         "test:tombstones": "node test_tombstone_invariance.js",
         "test:tombstones:report": "node test_tombstone_invariance.js --report-only"
     },

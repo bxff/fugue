@@ -26,7 +26,6 @@ const option = (name, fallback) => {
 const reportOnly = args.includes("--report-only");
 const explainOnly = args.includes("--explain");
 const jsonOutput = args.includes("--json");
-const includeExcluded = args.includes("--include-excluded");
 const moduleArg = option("--module", "fugue-max-simple");
 const exportName = option("--export", "FugueMaxSimple");
 const moduleSpecifier = moduleArg.startsWith("/")
@@ -343,47 +342,6 @@ const cases = [
     },
   },
   {
-    id: "N6",
-    name: "ghost history cannot move a whole forward-typed run",
-    property: "ghost-history neutrality + run clumping",
-    catches: "A single-character equality can hide run-level movement; this compares UV as a block.",
-    diagram: [
-      "original ABCD geometry, but Y is replaced by the forward run U->V",
-      "U has the disputed ghost-sensitive origin; V has LO=U",
-      "required: both histories agree and UV remains adjacent",
-    ],
-    run() {
-      const world = (includeGhost) => {
-        const a = new Doc("0"); a.insert(0, "A"); const A = a.take();
-        const b = new Doc("1"); b.insert(0, "B"); const B = b.take(); b.delete(0); const Bdel = b.take();
-        const c = new Doc("2"); c.insert(0, "C"); const C = c.take();
-        const d = new Doc("3"); d.insert(0, "D"); const D = d.take();
-        const x = new Doc("4"); x.applyAll([A, C]); x.insert(1, "X"); const X = x.take();
-        const z = new Doc("5"); z.applyAll([A, D]); z.insert(1, "Z"); const Z = z.take();
-        const uv = new Doc("6"); uv.apply(A);
-        if (includeGhost) uv.applyAll([B, Bdel]);
-        uv.insert(1, "U"); const U = uv.take();
-        uv.insert(2, "V"); const V = uv.take();
-        const updates = includeGhost
-          ? [A, B, C, D, Bdel, X, Z, U, V]
-          : [A, C, D, X, Z, U, V];
-        return merge(updates);
-      };
-      const absent = world(false);
-      const deliveredDead = world(true);
-      return predicateResult(
-        absent === deliveredDead && absent.includes("UV") && deliveredDead.includes("UV"),
-        "paired histories agree and contain contiguous UV",
-        `${JSON.stringify(absent)} vs ${JSON.stringify(deliveredDead)}`,
-        [],
-        [
-          { label: "History A", value: absent },
-          { label: "History B", value: deliveredDead },
-        ]
-      );
-    },
-  },
-  {
     id: "N7",
     name: "insert-before-delete and delete-before-insert commute in the right-child geometry",
     property: "visible-intent equivalence",
@@ -618,9 +576,9 @@ const cases = [
   },
 ];
 
-// Curation is part of the test specification.  Excluded candidates remain
-// executable with --include-excluded and remain visualized by the generated
-// review, but they do not make the default semantic suite fail.
+// Curation is part of the test specification. Each remaining case contributes
+// a distinct geometry, fix regression, or structural control. The complete
+// 134-row research audit is preserved in git history at commit 1a4f60b.
 const decisions = {
   N1: {
     decision: "retained",
@@ -646,11 +604,6 @@ const decisions = {
     decision: "retained",
     role: "chain generalization",
     rationale: "The minimal multi-tombstone extension. It prevents a repair that neutralizes only one dead boundary or performs only one replacement hop.",
-  },
-  N6: {
-    decision: "excluded",
-    role: "redundant composition",
-    rationale: "It repeats N3's ghost-sensitive placement with a two-character run; C2 independently guards run adjacency. It adds no new origin geometry or failure mode.",
   },
   N7: {
     decision: "retained",
@@ -809,32 +762,6 @@ const visuals = {
       },
     ],
     required: "Neither the presence nor the length of a dead chain may add a visible order.",
-  },
-  N6: {
-    question: "Can phantom history move an entire forward-typed run rather than one character?",
-    panels: [
-      {
-        title: "History A — run created without B",
-        state: ["A", "C", "D"],
-        origins: [
-          { node: "X", lo: "A", ro: "C", note: "witness" },
-          { node: "Z", lo: "A", ro: "D", note: "witness" },
-          { node: "U", lo: "A", ro: "END", note: "first typed character" },
-          { node: "V", lo: "U", ro: "END", note: "forward continuation" },
-        ],
-      },
-      {
-        title: "History B — run created after seeing B†",
-        state: ["A", "B†", "C", "D"],
-        origins: [
-          { node: "X", lo: "A", ro: "C", note: "same X" },
-          { node: "Z", lo: "A", ro: "D", note: "same Z" },
-          { node: "U", lo: "A", ro: "B†", note: "ghost-sensitive first character" },
-          { node: "V", lo: "U", ro: "B†", note: "must remain attached to U" },
-        ],
-      },
-    ],
-    required: "No new rule: N3 already requires U's neutral placement, while C2 requires U→V to remain contiguous.",
   },
   N7: {
     question: "Why is simply replacing a deleted RO with the next live element not sufficient?",
@@ -1113,28 +1040,6 @@ const causalGraphs = {
       },
     ],
   },
-  N6: {
-    worlds: [
-      {
-        title: "Forward run without B",
-        source: ["A", "C", "D"],
-        branches: [
-          { actor: "UV", view: ["A", "U", "V"], from: ["A"], origin: "U: LO=A, RO=end; V: LO=U" },
-          { actor: "X", view: ["A", "X", "C"], from: ["A", "C"], origin: "X: LO=A, RO=C" },
-          { actor: "Z", view: ["A", "Z", "D"], from: ["A", "D"], origin: "Z: LO=A, RO=D" },
-        ],
-      },
-      {
-        title: "Forward run after receiving B†",
-        source: ["A", "B†", "C", "D"],
-        branches: [
-          { actor: "UV", view: ["A", "U", "V", "B†"], from: ["A", "B†"], origin: "U: LO=A, RO=B†; V: LO=U" },
-          { actor: "X", view: ["A", "X", "C"], from: ["A", "C"], origin: "X: LO=A, RO=C" },
-          { actor: "Z", view: ["A", "Z", "D"], from: ["A", "D"], origin: "Z: LO=A, RO=D" },
-        ],
-      },
-    ],
-  },
   N7: {
     worlds: [
       {
@@ -1288,7 +1193,7 @@ if (explainOnly && !jsonOutput) {
   process.exit(0);
 }
 
-const selectedCases = includeExcluded ? cases : cases.filter((test) => test.decision === "retained");
+const selectedCases = cases;
 
 if (!jsonOutput) {
   console.log(`Tombstone semantic invariance suite (${moduleArg})`);

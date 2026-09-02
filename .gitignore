@@ -1,5 +1,8 @@
 node_modules
 dist
 generated
+!fugue-interleave/generated/
+!fugue-interleave/generated/tombstone-tests/
+!fugue-interleave/generated/tombstone-tests/**
 .vscode
 *.log

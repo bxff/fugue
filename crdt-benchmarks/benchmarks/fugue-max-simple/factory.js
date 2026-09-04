@@ -39,11 +39,7 @@ export class FugueMaxSimpleCRDT {
     });
     if (updateHandler) {
       this.doc.on("Send", (e) => {
-        const arrayFrontier = this.carray?.captureLocalPublicationFrontier();
-        const textFrontier = this.ctext?.captureLocalPublicationFrontier();
         updateHandler(this._encodeUpdate(e.message, false));
-        this.carray?.markLocalUpdatesSent(arrayFrontier);
-        this.ctext?.markLocalUpdatesSent(textFrontier);
       });
     }
     /**
@@ -131,6 +127,17 @@ export class FugueMaxSimpleCRDT {
   }
 
   /**
+   * Replace a range while preserving its pre-deletion structural slot.
+   *
+   * @param {number} index
+   * @param {number} deleteCount
+   * @param {Array<any>} elems
+   */
+  spliceArray(index, deleteCount, elems) {
+    this.transact(() => this.carray.splice(index, deleteCount, ...elems));
+  }
+
+  /**
    * @return {Array<any>}
    */
   getArray() {
@@ -155,6 +162,17 @@ export class FugueMaxSimpleCRDT {
    */
   deleteText(index, len) {
     this.transact(() => this.ctext.delete(index, len));
+  }
+
+  /**
+   * Replace text while preserving the replaced range's structural slot.
+   *
+   * @param {number} index
+   * @param {number} deleteCount
+   * @param {string} text
+   */
+  spliceText(index, deleteCount, text) {
+    this.transact(() => this.ctext.splice(index, deleteCount, ...text));
   }
 
   /**

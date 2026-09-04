@@ -1,234 +1,244 @@
-# Projected-gap FugueMax experiment
+# Support-projected FugueMax with explicit replacement
 
-> **Status (2026-09-04): not a completed or submission-ready correction.**
-> The projection itself repairs the remote phantom-barrier examples, but the
-> local remembered-gap rule below is transport-dependent. The same
-> `delete(B); insert(C)` edit emits a different insertion operation depending
-> only on whether `delete(B)` was handed to the sync layer first. The
-> strengthened N7 test and generalized commutation sensor expose this defect.
-> This file documents the experiment and the remaining design decision; it is
-> not a proof that FugueMax has been perfected.
+> **Status (2026-09-04): strong research candidate, not yet a proved or
+> submission-ready correction.** The implementation passes the retained 12-case
+> semantic suite and the current deterministic property profiles. That is
+> materially stronger than the previous RO-shifting, Fugue-Era, next-live, and
+> publication-handoff experiments, but bounded randomized testing is not a proof.
 
-This document describes the current tombstone-repair candidate in
-`fugue-max-simple/src/index.ts`. It replaces the rejected Fugue-Era design.
-The experiment is intentionally narrow: it removes ordering effects caused only by
-invisible insert-delete history, while retaining published FugueMax's tree,
-reverse-right-origin buckets, and non-interleaving behavior.
+The candidate is implemented in `fugue-max-simple/src/index.ts`. It preserves
+FugueMax's replicated tree and wire operations. Its two additions are:
 
-## The two laws
+1. ordinary insertions choose origins from a **support-aware visible
+   projection** of that tree; and
+2. a replacement is expressed explicitly with `splice`, which captures the
+   pre-deletion gap and lowers to ordinary inserts followed by deletes.
 
-The implementation is designed around two metamorphic laws rather than one
-preferred example output.
+There is no era bit, receiver-side re-anchoring, mutable right origin, or local
+transport/publication watermark.
 
-1. **Ghost neutrality.** If a token is inserted and deleted and no surviving
-   operation structurally references it, adding that history must not alter
-   the placement of later surviving edits. This includes a peer receiving the
-   insert and delete together, receiving the published insert and published
-   delete separately but making no intervening operation that references the
-   token, and a local insert-delete pair still in its outbox.
-2. **Replacement commutation.** With authors and concurrent operations fixed,
-   inserting `C` immediately before live `B` and then deleting `B` must agree
-   with deleting `B` and inserting `C` into `B`'s former gap. A transport
-   handoff between the two primitive commands must not change that result.
+## The semantic contract
 
-These laws explain why neither of the old extremes works:
+### 1. Ghost-history neutrality
 
-- retaining every known tombstone as the next insert's structural boundary
-  violates ghost neutrality;
-- always using the next live right origin violates replacement commutation
-  (N7) and can move an insertion across a reverse-RO bucket.
+Let `H+G` be a history obtained from `H` by adding an insert/delete history `G`
+that no surviving operation structurally depends on. Replaying the same visible
+edits with the same author identities must not gain another visible ordering:
 
-## Local outbox state
+```text
+visible(final(H)) = visible(final(H+G))
+```
 
-The CRDT tracks two local-only maps:
+The pair may arrive atomically or as a published insert followed later by its
+published deletion. It may have been visible for a time. What matters is
+structural support: if no surviving operation uses it through a parent or right
+origin, its tombstone must not redirect a later ordinary insertion.
 
-- local insertions not yet handed to the sync layer;
-- local deletions not yet handed to the sync layer.
+### 2. Referenced-history preservation
 
-The outbox handoff is represented by a monotonic local watermark. An application
-captures `captureLocalPublicationFrontier()` when it constructs an outgoing
-batch, then calls `markLocalUpdatesSent(frontier)` when that exact batch is
-handed to the sync layer. Calling `markLocalUpdatesSent()` without an argument
-is the convenient flush-all form. It must not be called merely because a local
-edit transaction ended.
+A dead node is not garbage merely because it is invisible. If a surviving or
+in-flight insertion has that node in its immutable parent/right-origin support,
+the node must remain in the replicated tree so the insertion remains reachable
+and all replicas can integrate it. Deletion removes only visibility; it does not
+rewrite origins or reorder survivors.
 
-Here “handed to the sync layer” means an irrevocable ownership transfer to the
-transport or durable outbox—not that a peer has already applied the bytes. The
-benchmark adapter treats its `updateHandler` callback as that transfer. An
-integration whose callback merely observes or temporarily buffers bytes must
-acknowledge the captured frontier later instead. Reading or serializing a
-snapshot never advances publication state.
+### 3. FugueMax structural controls
 
-The watermark matters for a real asynchronous outbox. If batch 1 is waiting
-while the user creates batch 2, publishing batch 1 must not accidentally mark
-batch 2's deletion as published. The old set-clearing prototype had exactly
-that ambiguity; acknowledging a captured prefix removes it.
+The repair must retain:
 
-This boundary cannot be inferred inside an operation-based CRDT. `sendPrimitive`
-means "give this update to the application's transport"; it does not say that a
-peer received it. Basing placement on guessed delivery or acknowledgement
-timing would itself create the timing-dependent variants the repair is intended
-to remove.
+- reverse-right-origin bucket ordering and same-RO clumping;
+- forward non-interleaving for causal continuations;
+- insertion/deletion stability: applying one operation cannot reorder existing
+  visible nodes; and
+- convergence for every fixed operation set and causally legal delivery order.
 
-The implemented experimental state machine for a dead node is (here “handed
-off” means handed to the local sync/transport layer, not acknowledged by a
-peer):
+### 4. Explicit replacement intent
 
-| Insert | Delete | Meaning to a new local insertion |
+An ordinary insertion after a deletion means insertion into the current
+projected visible gap. A logical replacement is a different edit and must use
+`splice`. Transport handoff, batching, callback timing, or whether a delete has
+already been serialized cannot change either operation's coordinates.
+
+## Why raw `delete; insert` cannot also mean replacement
+
+The decisive ambiguity is the retained D1 case:
+
+```text
+shared: A B
+
+X sees only A and inserts X:
+  X: LO=A, RO=END
+
+D sees A B, deletes B, then inserts R after A.
+
+M saw B alive and inserts M before B, but M is still in flight:
+  M: LO=A, RO=B
+
+choose IDs M < R < X
+```
+
+When D creates R, its local state is identical whether M exists or not. There
+are nevertheless two legitimate meanings:
+
+```text
+ordinary insertion after deletion:
+  R uses projected bucket (A,END)
+  before M: A R X
+  after late M: A R X M
+
+declared replacement of B:
+  R uses captured bucket (A,B)
+  before M: A X R
+  after late M: A X M R
+```
+
+No deterministic algorithm can infer which immutable bucket R should use from
+the raw local state: D cannot observe the in-flight M. Choosing `(A,B)` for all
+post-delete inserts restores phantom dependence on an unseen tombstone.
+Choosing `(A,END)` for all replacements breaks N7's same-slot grouping.
+Waiting for M would either make delivery order semantic or require moving R/X
+after they were already visible.
+
+Therefore the impossible promise is not C3. C3 only says that late M/Z remains
+reachable and does not move established survivors. The impossible promise is:
+
+> infer, from the same raw `delete(B); insert(R)` state, both ordinary current-gap
+> insertion and historical-slot replacement semantics.
+
+An explicit edit-level distinction is necessary unless the operation format is
+redesigned to carry equivalent user intent.
+
+## Support-aware projection
+
+Each inserted node already has immutable structural dependencies:
+
+- `parent` (the tree edge encoding its side/left-origin geometry); and
+- `rightOrigin`, for a right child.
+
+Before generating an ordinary insertion, the replica computes the transitive
+support closure of every live node:
+
+```text
+support = least set containing every live node
+          and closed under parent and non-END rightOrigin edges
+```
+
+It then walks the normal tombstone-inclusive FugueMax traversal from the visible
+predecessor, skipping a dead node only when that node is outside `support`.
+The first non-skipped successor determines the normal FugueMax encoding:
+
+- if it lies in the predecessor's right subtree, insert as its left child;
+- otherwise insert as a right child of the predecessor with that successor as
+  right origin; or use `END` when no successor remains.
+
+This is a generation-time view only. Skipped nodes are not removed, reparented,
+or rewritten. Receivers integrate the emitted ordinary FugueMax operation
+without recomputing projection from their own knowledge.
+
+This distinction handles both sides of the original problem:
+
+- an unsupported `B†` cannot manufacture a new bucket or left-child route;
+- a `B†` supporting live `Z` remains in the closure and a valid structural
+  anchor, including when Z arrives after the delete.
+
+## `splice` lowering
+
+The API is:
+
+```ts
+splice(startIndex, deleteCount, ...replacementValues)
+```
+
+It performs one logical replacement as follows:
+
+1. snapshot the identities of the live target nodes;
+2. insert the replacement run at `startIndex` while those targets are live;
+3. delete the snapped targets by identity.
+
+The insertion therefore captures the target's original structural slot without
+guessing from a later tombstone. Inserting the whole replacement run first also
+preserves its normal FugueMax causal continuation. The emitted primitives and
+saved replicated state remain ordinary FugueMax; old receivers need no new wire
+message. Integrations must call `splice`/replace when that is the user's
+logical action. Raw `delete` followed by raw `insert` remains ordinary editing.
+
+Wire compatibility is not the same as mixed-writer semantic compatibility. An
+old writer can still generate a new insertion anchored to an unsupported
+tombstone; once received, that insertion legitimately supports the tombstone.
+A rollout seeking ghost neutrality therefore has to upgrade writers (readers
+may remain wire-compatible) or version the editing policy.
+
+The prototype recomputes the live support closure for every inserted scalar,
+which is linear in retained tree size. This is suitable for validating the
+semantics, not a final performance design. A production implementation should
+maintain dependency support counts or cache/invalidate the closure and then
+benchmark it against the existing workloads.
+
+## Retained case coverage
+
+| Cases | Obligation | Candidate mechanism |
 |---|---|---|
-| still local | still local | cancellable ghost; transparent |
-| already handed off/remote | still local | remembered deleted gap; retained |
-| any | already handed off/remote | historical tombstone; transparent unless reached through live descendants |
+| N1-N5 | Atomic/staged unsupported ghosts add no variant, including start, interior, route, and chain geometries | Skip unsupported dead nodes during origin generation |
+| N7 | Replacement has one stable pre-delete slot across fixed IDs, ranges, and replacement runs | Explicit `splice`; insert-before-delete lowering |
+| S1-S2 | Deletion never jumps or repeatedly retargets existing content | Immutable origins; visibility-only delete |
+| C1 | Preserve reverse-RO buckets and same-bucket clumping | Original FugueMax comparator unchanged |
+| C2 | Preserve forward continuation adjacency | Original tree ordering; no global era override |
+| C3 | Preserve meaningful `LO=B` and `RO=B` history, including late delivery | Parent/RO support closure; tombstones retained |
+| D1 | Do not conflate ordinary post-delete insertion with replacement | Separate `insert` and `splice` intent |
 
-Thus a queued insert-delete pair cannot redirect later local operations, while
-a queued deletion of established content remembers exactly the gap needed for
-replacement typing. Once the deletion is handed off, later edits use the current
-visible gap; there is no permanent "era" attached to the tombstone.
+Published FugueMax fails N1-N5 and D1's ordinary-insertion branch; it also lacks
+the declared-splice equivalence required by N7. The candidate currently passes
+all 12 retained cases. These are semantic comparisons, not merely convergence
+checks.
 
-That last transition is the known flaw. Transport scheduling is not user edit
-intent. In the real adapters, every emitted update is handed off immediately,
-so ordinary backspace followed by typing normally takes the transparent branch
-and fails the N7 comparison. Delaying the callback makes the same edits pass.
+## Generalized verification
 
-This is intended to cover a published insert that becomes irrelevant later. A
-recipient may see the insert alive for an arbitrary interval and cross arbitrary
-network boundaries. It may even edit elsewhere. If it creates no operation
-referencing that token during
-the interval, then after the separately published delete arrives its next
-insertion uses the same projected gap as a replica that never knew the token.
-Publication alone does not make a dead token a permanent boundary.
+`fugue-interleave/fuzz_tombstone_properties.js` generates arbitrary legal
+multi-replica traces first, then applies independent metamorphic sensors. The
+required candidate profile currently checks:
 
-## Projected insertion tree
+- atomic and staged ghost insertion/deletion transforms;
+- local ghost structural neutrality;
+- transport-stutter invariance;
+- declared-splice versus insert-before-delete lowering, with target/replacement
+  runs and concurrent same-gap witnesses;
+- the combined D1 intent boundary over arbitrary prefixes, both ID directions,
+  and late `RO=target` delivery schedules;
+- referenced tombstones through both parent/LO and right-origin edges;
+- generalized reverse-RO buckets;
+- stepwise insertion/deletion projection;
+- forward non-interleaving; and
+- convergence.
 
-Deletes never restructure the replicated FugueMax tree. They only mark nodes
-deleted; the device-local outbox state stays outside the replicated tree.
-When generating an insertion at visible index `i`:
+The deterministic checked bounds currently find zero candidate failures. The
+published implementation is separately expected to produce counterexamples for
+the published-bug and splice/D1-facing sensors. Exact commands and limits are in
+`fugue-interleave/TOMBSTONE_FUZZING.md`.
 
-1. Find the visible predecessor `L` (or the root sentinel).
-2. Walk forward from `L` in the tombstone-inclusive FugueMax traversal.
-3. Ignore a dead node unless it is an established node whose locally generated
-   deletion has not yet been handed to the sync layer. Ignoring a node does not
-   ignore its descendants; live descendants remain meaningful positions.
-4. Let `R` be the first node that survives this projection, or end-of-list.
-5. If `R` is in `L`'s right subtree, encode the insertion as a left child of
-   `R`. Otherwise encode it as a right child of `L` with right origin `R`.
+## What remains before a “corrected Fugue” claim
 
-The emitted insertion is an ordinary immutable FugueMax operation. Receivers do
-not repeat a knowledge-dependent walk and do not re-anchor it. Siblings use the
-published ordering exactly:
+This is the closest candidate in the repository, but it is not yet a proof of a
+perfected algorithm. At minimum, the following remain:
 
-- right children: reverse right-origin order, then immutable ID;
-- left children: immutable ID.
+1. bounded exhaustive enumeration of small causal histories and all legal
+   deliveries, not only seeded random traces;
+2. deeper support geometries: alternating parent/RO chains, nested left-child
+   routes, several tombstones, and references that become live/dead repeatedly;
+3. restart/save-load tests interleaved at arbitrary cuts;
+4. multi-element and overlapping splices concurrent with edits inside and at
+   both ends of the replaced range;
+5. adversarial mutants demonstrating that every sensor rejects its intended
+   broken strategy rather than passing vacuously;
+6. a precise abstract specification and proof of convergence, projection
+   stability, ghost quotient invariance, and preserved FugueMax
+   non-interleaving; and
+7. integration review: editors that currently lower replacement to separate
+   delete/insert calls must adopt the explicit API to obtain replacement
+   semantics.
 
-Consequently delete-free executions use published FugueMax placement. Deletes
-never re-sort existing siblings.
+The defensible current statement is:
 
-## Why the cases pass
-
-- **N1-N5 / generalized remote ghosts:** a received dead node is absent from
-  the insertion projection, including the left-child route and dead chains.
-- **Local ghost property:** a node present in both unpublished maps is absent
-  from the projection, so the next insertion gets the same structural bucket
-  as if the pair had never occurred.
-- **N7 / generalized replacement commutation:** the experiment passes only
-  while `delete(B)` remains in the local outbox. It fails after handoff because
-  `C` moves from B's bucket to the projected live-successor bucket. The test
-  covers both schedules, a `B` created earlier by the replacing author, and
-  deletion runs of length one to three.
-- **S1-S2:** deletion changes visibility only; no origin is rewritten and no
-  sibling array is re-sorted.
-- **C1:** the reverse-RO comparator is unchanged.
-- **C2:** no era bit can override FugueMax's tree and split `P -> Q`.
-- **C3:** skipping a tombstone does not discard its live descendants. A
-  same-outbox local replacement also retains the deleted gap until handoff.
-
-## What is and is not claimed
-
-### The unresolved intent ambiguity
-
-The primitive sequence `delete(B); insert(Y)` does not say whether the user is
-performing a logical replacement in B's old slot or a separate later insertion
-into the new visible gap. Those meanings demand different immutable FugueMax
-coordinates. Outbox timing cannot safely select between them, and waiting for
-a later reference to B would make existing text move or make delivery order
-matter.
-
-A transport-independent design therefore needs an explicit edit-level
-distinction. The clearest current direction is a `splice`/`replace` operation
-that captures the pre-edit gap and emits the replacement run there before
-tombstoning its targets. Ordinary primitive insertion after a deletion would
-always use the projected live gap. N7 would then compare two internal schedules
-of the same declared splice, rather than infer replacement intent from adjacent
-raw calls. This design has not yet been implemented or proved here.
-
-### The in-flight-reference boundary
-
-Suppose `G` was already handed to sync and another replica authored continuation
-`X` while `G` was live. If `X` is still in flight when a different replica
-receives `delete(G)` and types `Y`, the dead `G` must remain in the replicated
-tree so late `X` still has a valid origin. It is only transparent to the local
-projection that chooses Y's new origins.
-
-C3 therefore requires reference safety: every delivery order converges,
-deleting `G` removes only `G`, and receiving late `X` adds only `X` without
-moving established survivors. When delete(G) was handed to sync before Y was
-typed and Y did not know X, the remaining immutable FugueMax structure decides
-their relative order; both `YX` and `XY` can be valid under different ID
-assignments. No universal Y-before-X rule is part of C3 or this algorithm.
-
-The implementation gives semantic neutrality, not immediate physical garbage
-collection. Insert and delete operations still exist in the causal operation
-log because another replica may already reference them—or may have authored a
-reference while the insert was live that is still in flight. Such a reference
-remains valid because the replicated tree is never rewritten and projection
-walks through skipped tombstones to their live descendants. Safe tombstone/log
-GC requires protocol-level stability or acknowledgements and is a separate
-task.
-
-The explicit publication frontier is part of this experiment's integration contract.
-Without an outbox boundary, "unsynced" has no well-defined meaning and the N7
-command-order law cannot be scoped correctly. `saveLocalPublicationState()` and
-`loadLocalPublicationState()` persist that device-local watermark and its
-not-yet-handed-off node IDs beside the transport's durable outbox. This state is
-deliberately absent from replicated snapshots, so restoring a mid-outbox
-checkpoint requires both pieces; alternatively the application can flush
-before saving. The local blob contains a fingerprint of the exact Fugue tree
-and rejects a mismatched shared snapshot, catching both ordinary torn-write
-directions. Publication-only changes leave the tree unchanged, so the shared
-snapshot, local blob, and durable outbox must still be committed atomically as
-one local checkpoint. Restoration must use a fresh replica ID: like the original
-`fugue-max-simple`, the per-replica insertion counter is intentionally not in
-the replicated snapshot, so reusing the old ID would create duplicate node
-IDs. The local checkpoint records the old ID and rejects that unsafe restore.
-
-The present evidence is neither a completion claim nor a machine-checked proof.
-The experiment passes the remote, staged-published, and local-outbox ghost
-transformations, reverse-RO buckets, stepwise stability, forward
-non-interleaving, convergence, and the currently generated late-`LO` reference
-cases. It fails deletion/insertion commutation when a transport handoff occurs
-between those edits. The fuzzer also does not yet cover all `RO=G`, left-child,
-tombstone-chain, restart, and causal-delivery geometries. The
-experimental backward checker is not a validity oracle: it reports published
-FugueMax itself on traces where its premise reconstruction is incomplete, so it
-remains outside the required profile.
-
-## Independent audit outcome
-
-Four independent reviews of the algorithm, semantic contract, fuzzer, and
-alternative design reached the same conclusion:
-
-- N1-N5 are real published-FugueMax failures; N7 and C3 are not the only
-  important cases. N7/C3 constrain repairs, while S1/S2/C1/C2 protect deletion
-  stability, reverse-RO clumping, and non-interleaving.
-- the generalized fuzzer is useful metamorphic testing over arbitrary settled
-  prefixes, but its N7 and C3 extensions are still bounded templates rather
-  than an exhaustive state-space proof;
-- the handoff-dependent N7 failure is reproducible both minimally and in 261
-  of 300 deterministic generalized trials with the current seed; and
-- a credible next design should remove transport state from origins and expose
-  replacement as explicit splice/edit intent, then broaden C3 generation to
-  `LO=G`, `RO=G`, left-child, chain, restart, and all causal-delivery cases.
-
-Accordingly, this repository is an audited research checkpoint with a strong
-test harness and a falsified candidate—not yet a corrected Fugue algorithm that
-should be presented as complete.
+> Support-projected FugueMax plus explicit splice is a transport-independent
+> candidate that resolves every retained minimal counterexample and passes the
+> present generalized sensors. It should be submitted as a proposal with its
+> test evidence and open proof obligations, not yet as a perfected algorithm.

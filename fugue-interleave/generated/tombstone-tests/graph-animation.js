@@ -2,7 +2,7 @@
   'use strict';
   const COLORS = {
     grey: '#3c3c3c', edge: '#484848', text: '#d7d7da', dim: '#8d8d92',
-    red: '#f14c4c', blue: '#3794ff', green: '#35c47a', orange: '#ffad45',
+    red: '#f14c4c', blue: '#3794ff', green: '#35c47a', orange: '#ffad45', purple: '#c586f0',
     shared: '#f586f0', white: '#ffffff', yellow: '#ffd83d', pass: '#35c47a', fail: '#ff5b52'
   };
   const BRANCH_COLORS = [COLORS.red, COLORS.blue, COLORS.green, COLORS.orange];
@@ -174,7 +174,7 @@
     };
   }
 
-  function setupC3Proof(canvas, graph) {
+  function setupIntentProof(canvas, graph) {
     const ctx = canvas.getContext('2d');
     const nodes = new Map(graph.nodes.map(node => [node.id, node]));
     const color = name => COLORS[name] || COLORS.grey;
@@ -274,7 +274,7 @@
       });
 
       if (stageProgress(5, elapsed) > .98) {
-        centerText('The two partial states agree: preserve Z<W and W<Y, giving AZWY.', .5, .985, .012, COLORS.dim, 650);
+        centerText('The two meanings stay stable because R chooses its bucket before late M arrives.', .5, .985, .012, COLORS.dim, 650);
       }
     }
 
@@ -300,8 +300,8 @@
     proofCleanups.forEach(cleanup => cleanup());
     proofCleanups = [];
     if (!root || !graphCase) return;
-    root.querySelectorAll('canvas[data-c3-proof]').forEach(canvas => {
-      proofCleanups.push(setupC3Proof(canvas, graphCase));
+    root.querySelectorAll('canvas[data-intent-proof]').forEach(canvas => {
+      proofCleanups.push(setupIntentProof(canvas, graphCase));
     });
   };
   if (window.GRAPH_CASE) window.renderGraphCase(document, window.GRAPH_CASE);

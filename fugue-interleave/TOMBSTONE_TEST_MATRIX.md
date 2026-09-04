@@ -1,7 +1,7 @@
 # FugueMax tombstone semantic tests
 
 The executable suite is [`test_tombstone_invariance.js`](./test_tombstone_invariance.js).
-Its eleven cases are visualized in
+Its twelve cases are visualized in
 [`generated/tombstone-tests/index.html`](./generated/tombstone-tests/index.html).
 The independent arbitrary-trace fuzzer, its metamorphic rewrites, deterministic
 replay commands, and conservative structural predicates are documented in
@@ -30,7 +30,7 @@ insertion intents with the same replica IDs. The required property is:
 visible(final(H)) = visible(final(H+G))
 ```
 
-This is subject to five preservation rules:
+This is subject to seven preservation rules:
 
 1. Reverse-right-origin clumping must still hold.
 2. A forward continuation `LO(q)=p` must not be split.
@@ -38,11 +38,12 @@ This is subject to five preservation rules:
 4. A tombstone referenced by surviving content is meaningful history and
    cannot be erased as though it were an unobserved ghost. This must remain
    true when the reference is in flight and the delete was already published.
-5. Transport handoff alone must not change insertion semantics. With author
-   IDs fixed, the N7 insert/delete comparison must give the same result whether
-   `delete(B)` remains queued or is handed to sync before the following insert.
-6. A local insert-delete pair in one unpublished epoch must not change the
-   structural bucket of the author's next insertion.
+5. Transport handoff alone must not change insertion semantics.
+6. A local insert-delete pair must not change the structural bucket of the
+   author's next insertion when no survivor depends on the pair.
+7. Ordinary insertion after deletion and replacement of deleted content are
+   distinct intents. Replacement must be declared and retain the pre-delete
+   slot; ordinary insertion must use the current supported visible gap.
 
 The suite separates these semantic comparisons from delivery-order
 convergence. Published FugueMax already converges for one fixed operation set;
@@ -125,35 +126,27 @@ still failing when several invisible boundaries must be neutralized.
 
 ## Regressions for proposed simple fixes
 
-### N7 — next-live RO changes insert/delete order semantics
+### N7 — declared replacement preserves the live slot
 
 ```text
 shared visible state: A Y B
 M inserted in (Y,B): LO(M)=Y, RO(M)=B
 
-history 1: insert C in (Y,B), then delete B
-           LO(C)=Y, RO(C)=B
-history 2: delete B, then insert C after Y
-           canonical RO(C)=B†; naive next-live RO(C)=end
+reference lowering: insert C in (Y,B), then delete B
+                    LO(C)=Y, RO(C)=B
+declared lowering:  splice(index(B), 1, C)
+                    captures the same live (Y,B) slot
 ```
 
-Published FugueMax gives the same result in both histories for each fixed
-sender assignment. With `M<C` it gives `AYMC`; with `C<M` it gives `AYCM`.
-The plain next-live repair can disagree because `C` changes from an ID tie with
-`M` to a different reverse-RO class. The generalized checker varies the
-surrounding trace, selected B, witnesses, routing geometry, and both relative
-ID assignments while holding the IDs fixed between corresponding histories.
-It compares insert-then-delete, delete-then-insert before handoff, and
-delete-handoff-insert.
-The executable case also repeats the comparison when C's author created and
-published B earlier; this prevents confusing author identity with publication
-state.
+For each fixed sender assignment, both lowerings must agree. With `M<C` the
+result is `AYMC`; with `C<M` it is `AYCM`. This preserves exact-RO clumping
+without making ordinary post-delete insertion depend on B†.
 
-The projected-gap experiment passes the first two worlds but fails the third:
-with a lower-ID witness `M`, it produces `AYMC`, `AYMC`, then `AYCM`. That is a
-real blocker because the benchmark adapters hand each emitted update to their
-send callback immediately. A transport boundary is not a semantic distinction
-between otherwise identical document edits.
+The generalized checker varies the arbitrary settled prefix, selected target
+range, replacement run, one to three concurrent witnesses, and both relative ID
+directions. It compares the declared API with the canonical insert-before-delete
+lowering—not arbitrary raw command orders. A transport handoff is separately
+tested as an irrelevant stutter step.
 
 ### S1 — deletion cannot re-sort surviving siblings
 
@@ -197,51 +190,67 @@ rejects global Era separation.
 ```text
 shared AB
 Z typed after live B: LO(Z)=B
-another peer deletes B without seeing Z
-compare typing Y before versus after handing delete(B) to the sync layer
+another peer deletes B without seeing Z and types ordinary Y after A
+deliver Z before or after that edit; insert irrelevant transport handoffs
 run Y IDs on both sides of B's ID
-required while delete is still in the local outbox: AYZ
-required after handoff: Z survives; adding Y does not reorder A/Z
+required: Z survives; delete/insert steps do not reorder established survivors
 ```
 
 `B†` is meaningful because surviving `Z` depends on it. Treating every deleted
-node as physically disposable would lose Z or break convergence. While the
-delete and replacement remain in one local-outbox epoch, the remembered gap
-gives `AYZ`. After the handoff to sync, either `AYZ` or `AZY` is valid: Y cannot
-know whether Z or other same-gap content is still in flight, and it may not
-retroactively reorder established survivors.
+node as physically disposable would lose Z or break convergence. B† therefore
+remains in the replicated support closure.
 
-#### Post-handoff ordering
+Either `AYZ` or `AZY` can be valid under different immutable ID/tree
+relationships. Y's author does not know in-flight Z and cannot use Z as an
+origin. C3 requires survival, convergence, and stepwise stability; it does not
+invent a universal Y-before-Z rule. Transport handoff is not part of the
+semantic premise.
 
-After delete(B) has been handed to sync, a later Y that does not know an
-in-flight Z cannot use Z as an origin. B† remains in the replicated tree so Z
-is still reachable, but it is transparent to the projection that generates Y.
-The immutable FugueMax structure may therefore produce either `AYZ` or `AZY`
-under different ID assignments. C3 requires survival, convergence, and no
-reordering of established survivors; it adds no universal Y-before-Z rule.
+### D1 — ordinary insertion is not inferred replacement
+
+```text
+shared AB
+X sees only A: X:(LO=A, RO=END)
+D deletes B, then ordinarily inserts R after A
+M saw live B: M:(LO=A, RO=B), still in flight
+IDs M < R < X
+```
+
+D cannot know whether M exists. Ordinary R uses the current supported gap
+`(A,END)` and gives `ARX`, then `ARXM` when M arrives. Declared replacement R
+uses B's captured live slot `(A,B)` and gives `AXR`, then `AXMR`.
+
+The same raw local state cannot determine both immutable coordinates. This case
+rules out the old local-outbox/publication heuristic and explains why `splice`
+is an explicit edit-level operation. Its generalized sensor varies the settled
+prefix and gap, both ID directions, and whether late `RO=B` content arrives
+before or after the ordinary/replacement operation.
 
 ## Current results
 
-| Case | Published FugueMax | Projected-gap experiment |
+| Case | Published FugueMax | Support projection + splice |
 |---|:---:|:---:|
 | N1 document-start ghost | fail | pass |
 | N2 interior RO barrier | fail | pass |
 | N3 original ABCD figure | fail | pass |
 | N4 left/right route | fail | pass |
 | N5 dead chain | fail | pass |
-| N7 fixed-ID commutation, including handoff | pass | **fail** |
+| N7 declared splice lowering | unsupported | pass |
 | S1 deletion stability | pass | pass |
 | S2 chain deletion stability | pass | pass |
 | C1 reverse-RO clumping | pass | pass |
 | C2 forward continuation | pass | pass |
-| C3 referenced tombstone, with scoped published-delete safety | pass | pass |
+| C3 referenced tombstone, parent and RO safety | pass | pass |
+| D1 ordinary insertion versus explicit replacement | fail | pass |
 
-Published FugueMax passes 6/11; the projected-gap experiment passes 10/11. The
-generalized staged-ghost and referenced-tombstone sensors exercise lifecycle
-boundaries beyond the hand-written cases. The remaining N7 failure means this
-is not a completed corrected Fugue algorithm. Future repairs must be
-transport-independent and preserve late references without allowing already
-visible elements to jump.
+Published FugueMax passes 5/12 under the active contract; support-projected
+FugueMax with explicit splice passes 12/12. The generalized staged-ghost,
+splice-lowering, reverse-RO, and referenced-tombstone sensors exercise lifecycle
+and structural boundaries beyond the hand-written cases.
+
+This is strong evidence for the candidate, not an exhaustive correctness proof.
+Bounded causal enumeration, deeper support chains, restart cuts, concurrent
+range splices, mutation testing, and formal proof remain open.
 
 ## Why the rest was removed
 
@@ -252,7 +261,7 @@ The archived cases fell into one of these categories:
 - disputed universal Era-separation expectations;
 - the former C4 sender-ID swap, because changing author identities is not a
   semantics-preserving transformation; its valid fixed-ID commuting relation
-  is now covered by N7;
+  is now covered by N7's fixed-ID splice relation;
 - delete-free performance and benchmark workloads;
 - implementation plumbing for abandoned receiver-walk/RO-shifting designs;
 - randomized property families better evaluated after the semantic oracle is
@@ -260,4 +269,4 @@ The archived cases fell into one of these categories:
 - unrecovered scratch descriptions without enough operations to execute.
 
 They remain useful research provenance in `1a4f60b`, but keeping them in the
-active review obscured the eleven independent obligations above.
+active review obscured the twelve independent obligations above.

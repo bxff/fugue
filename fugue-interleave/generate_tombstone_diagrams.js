@@ -39,7 +39,7 @@ const requested = valuesFor("--implementation");
 const implementations = requested.length > 0
   ? requested.map(parseImplementation)
   : [
-      { label: "Projected-gap experiment", module: "fugue-max-simple" },
+      { label: "Support-projected FugueMax + splice", module: "fugue-max-simple" },
       { label: "Published FugueMax", module: "fugue-max-canonical", optional: true },
     ];
 const outputDir = resolve(here, valueFor("--out", "generated/tombstone-tests"));
@@ -557,7 +557,7 @@ function renderAnimationScript() {
   'use strict';
   const COLORS = {
     grey: '#3c3c3c', edge: '#484848', text: '#d7d7da', dim: '#8d8d92',
-    red: '#f14c4c', blue: '#3794ff', green: '#35c47a', orange: '#ffad45',
+    red: '#f14c4c', blue: '#3794ff', green: '#35c47a', orange: '#ffad45', purple: '#c586f0',
     shared: '#f586f0', white: '#ffffff', yellow: '#ffd83d', pass: '#35c47a', fail: '#ff5b52'
   };
   const BRANCH_COLORS = [COLORS.red, COLORS.blue, COLORS.green, COLORS.orange];
@@ -729,7 +729,7 @@ function renderAnimationScript() {
     };
   }
 
-  function setupC3Proof(canvas, graph) {
+  function setupIntentProof(canvas, graph) {
     const ctx = canvas.getContext('2d');
     const nodes = new Map(graph.nodes.map(node => [node.id, node]));
     const color = name => COLORS[name] || COLORS.grey;
@@ -829,7 +829,7 @@ function renderAnimationScript() {
       });
 
       if (stageProgress(5, elapsed) > .98) {
-        centerText('The two partial states agree: preserve Z<W and W<Y, giving AZWY.', .5, .985, .012, COLORS.dim, 650);
+        centerText('The two meanings stay stable because R chooses its bucket before late M arrives.', .5, .985, .012, COLORS.dim, 650);
       }
     }
 
@@ -855,8 +855,8 @@ function renderAnimationScript() {
     proofCleanups.forEach(cleanup => cleanup());
     proofCleanups = [];
     if (!root || !graphCase) return;
-    root.querySelectorAll('canvas[data-c3-proof]').forEach(canvas => {
-      proofCleanups.push(setupC3Proof(canvas, graphCase));
+    root.querySelectorAll('canvas[data-intent-proof]').forEach(canvas => {
+      proofCleanups.push(setupIntentProof(canvas, graphCase));
     });
   };
   if (window.GRAPH_CASE) window.renderGraphCase(document, window.GRAPH_CASE);
@@ -864,69 +864,68 @@ function renderAnimationScript() {
 `;
 }
 
-function c3HandoffGraphData() {
+function lateROIntentGraphData() {
   return {
     nodes: [
-      { id: "A", x: 0.50, y: 0.07, state: ["A"], note: "shared start", stage: 0, color: "shared" },
-      { id: "B", x: 0.28, y: 0.19, state: ["A", "B"], note: "insert B", stage: 1, color: "red" },
-      { id: "W", x: 0.75, y: 0.19, state: ["A", "W"], note: "insert W · never saw B", stage: 1, color: "blue" },
-      { id: "Z", x: 0.17, y: 0.34, state: ["A", "B", "Z"], note: "Z after live B · LO(Z)=B", stage: 2, color: "red" },
-      { id: "D", x: 0.40, y: 0.34, state: ["A", "B†"], note: "hand delete(B) to sync", stage: 2, color: "green" },
-      { id: "ZW", x: 0.25, y: 0.50, state: ["A", "B", "Z", "W"], note: "merge Z + W", stage: 3, color: "shared" },
-      { id: "Y", x: 0.55, y: 0.49, state: ["A", "Y", "B†"], note: "type Y · LO=A, RO=end", stage: 3, color: "green" },
-      { id: "AZW", x: 0.25, y: 0.69, state: ["A", "Z", "W"], note: "delete removes only B · therefore Z<W", stage: 4, color: "white" },
-      { id: "AWY", x: 0.71, y: 0.69, state: ["A", "W", "Y"], note: "ghost-neutral merge · therefore W<Y", stage: 4, color: "white" },
-      { id: "FINAL", x: 0.48, y: 0.86, state: ["A", "Z", "W", "Y"], note: "valid final merge · Z<W and W<Y", stage: 5, color: "white" },
+      { id: "AB", x: 0.50, y: 0.07, state: ["A", "B"], note: "shared visible state", stage: 0, color: "shared" },
+      { id: "X", x: 0.16, y: 0.22, state: ["A", "X"], note: "X saw only A · RO=end", stage: 1, color: "blue" },
+      { id: "M", x: 0.84, y: 0.22, state: ["A", "M", "B"], note: "M uses RO=B · still in flight", stage: 1, color: "red" },
+      { id: "O", x: 0.34, y: 0.39, state: ["A", "R", "B†"], note: "ordinary insert after delete · R.RO=end", stage: 2, color: "green" },
+      { id: "S", x: 0.66, y: 0.39, state: ["A", "R", "B†"], note: "declared splice · R.RO=B", stage: 2, color: "purple" },
+      { id: "OP", x: 0.27, y: 0.61, state: ["A", "R", "X"], note: "ordinary prefix before M", stage: 3, color: "white" },
+      { id: "SP", x: 0.73, y: 0.61, state: ["A", "X", "R"], note: "replacement prefix before M", stage: 3, color: "white" },
+      { id: "OF", x: 0.27, y: 0.83, state: ["A", "R", "X", "M"], note: "late M is a pure addition", stage: 4, color: "white" },
+      { id: "FINAL", x: 0.73, y: 0.83, state: ["A", "X", "M", "R"], note: "late M joins captured B bucket", stage: 4, color: "white" },
     ],
     edges: [
-      { from: "A", to: "B", color: "red", stage: 1 },
-      { from: "A", to: "W", color: "blue", stage: 1 },
-      { from: "B", to: "Z", color: "red", stage: 2 },
-      { from: "B", to: "D", color: "green", stage: 2 },
-      { from: "Z", to: "ZW", color: "red", stage: 3 },
-      { from: "W", to: "ZW", color: "blue", stage: 3 },
-      { from: "D", to: "Y", color: "green", stage: 3 },
-      { from: "ZW", to: "AZW", color: "red", stage: 4 },
-      { from: "D", to: "AZW", color: "green", stage: 4 },
-      { from: "W", to: "AWY", color: "blue", stage: 4 },
-      { from: "Y", to: "AWY", color: "green", stage: 4 },
-      { from: "AZW", to: "FINAL", color: "red", stage: 5, label: "preserve Z<W" },
-      { from: "AWY", to: "FINAL", color: "blue", stage: 5, label: "preserve W<Y" },
+      { from: "AB", to: "X", color: "blue", stage: 1 },
+      { from: "AB", to: "M", color: "red", stage: 1 },
+      { from: "AB", to: "O", color: "green", stage: 2 },
+      { from: "AB", to: "S", color: "purple", stage: 2 },
+      { from: "X", to: "OP", color: "blue", stage: 3 },
+      { from: "O", to: "OP", color: "green", stage: 3 },
+      { from: "X", to: "SP", color: "blue", stage: 3 },
+      { from: "S", to: "SP", color: "purple", stage: 3 },
+      { from: "OP", to: "OF", color: "green", stage: 4, label: "preserve R<X" },
+      { from: "M", to: "OF", color: "red", stage: 4 },
+      { from: "SP", to: "FINAL", color: "purple", stage: 4, label: "preserve X<R" },
+      { from: "M", to: "FINAL", color: "red", stage: 4 },
     ],
   };
 }
 
-function renderC3HandoffGraph() {
-  const graphCase = c3HandoffGraphData();
+function renderIntentBoundaryGraph() {
+  const graphCase = lateROIntentGraphData();
   const data = JSON.stringify(graphCase).replaceAll("</", "<\\/");
   return `
-    <section class="c3-proof c3-graph-proof" id="c3-proof" hidden>
+    <section class="c3-proof c3-graph-proof" id="intent-proof" hidden>
       <header class="proof-head">
-        <p>WHY THE POST-HANDOFF RESULT IS VALID</p>
-        <h2>One history and two compatible partial merges produce AZWY.</h2>
-        <span>Follow the connected paths downward. No additional Y-before-Z rule is assumed.</span>
+        <p>WHY EXPLICIT REPLACEMENT INTENT IS NECESSARY</p>
+        <h2>An in-flight RO=B insertion makes bare delete-then-insert ambiguous.</h2>
+        <span>Both branches are stable. They differ because ordinary insertion and replacement intentionally choose different gaps.</span>
         <div class="proof-cast" aria-label="Characters used in the example">
-          <i><b>B</b> deleted origin</i><i><b>Z</b> continuation of live B</i><i><b>W</b> concurrent ordering witness</i><i><b>Y</b> later insert after deletion</i>
+          <i><b>B</b> deleted boundary</i><i><b>X</b> end-bucket witness</i><i><b>M</b> late RO=B reference</i><i><b>R</b> inserted or replacement text</i>
         </div>
-        <div class="publication-key"><b>“Still in the local outbox”</b> means delete(B) was generated on this device but has not yet been handed to the sync layer. <b>“Handed to sync”</b> is the explicit local handoff point—not a delivery acknowledgement from every peer.</div>
+        <div class="publication-key"><b>The replacer cannot know whether M exists.</b> Transport timing cannot resolve that missing intent. A splice captures B's live gap before deletion; an ordinary insertion projects through unsupported B†.</div>
       </header>
       <div class="unified-proof-graph">
-        <h3>How the same operations reach the final merge</h3>
-        <p>Every operation, deletion, and merge is shown in its final state.</p>
-        <canvas data-c3-proof aria-label="Connected graph showing the valid C3 post-handoff merge"></canvas>
+        <h3>Two declared meanings, each stable under late delivery</h3>
+        <p>Follow ordinary insertion on the left and declared replacement on the right.</p>
+        <canvas data-intent-proof aria-label="Connected graph showing ordinary insertion and explicit replacement under a late right-origin reference"></canvas>
       </div>
-      <div class="proof-equation" aria-label="Z before W and W before Y imply AZWY">
-        <span><b>Z &lt; W</b><small>deletion stability</small></span>
-        <i>+</i>
-        <span><b>W &lt; Y</b><small>ghost neutrality</small></span>
-        <i>=</i>
-        <strong>A Z W Y</strong>
+      <div class="proof-equation" aria-label="Ordinary insertion and replacement use different stable buckets">
+        <span><b>R.RO = end</b><small>ordinary insertion</small></span>
+        <i>→</i>
+        <strong>A R X M</strong>
+        <span><b>R.RO = B</b><small>declared replacement</small></span>
+        <i>→</i>
+        <strong>A X M R</strong>
       </div>
       <div class="proof-conclusion">
-        <b>What C3 requires</b>
-        <span>C3 only requires B† to keep late Z reachable without moving existing survivors. In the current experiment, Y stays in B's gap before handoff but uses LO=A, RO=end after handoff, so AYZ or AZY may result. N7 separately shows why making that distinction depend on handoff is not an acceptable final design.</span>
+        <b>What D1 establishes</b>
+        <span>No algorithm can infer these two meanings from the same bare delete/insert calls while M is unknown. The corrected API must carry replacement intent explicitly; handoff, delay, and acknowledgement are never semantic inputs.</span>
       </div>
-      <script>window.C3_PROOF_CASE = ${data};</script>
+      <script>window.INTENT_PROOF_CASE = ${data};</script>
     </section>`;
 }
 
@@ -934,9 +933,10 @@ function renderIndex(animationVersion) {
   const reviewCases = canonicalCases;
   const semanticGroups = [
     [["N1", "N2", "N3", "N4", "N5"], "Ghost-history neutrality"],
-    [["N7"], "Naive-fix regression"],
+    [["N7"], "Replacement semantics"],
     [["S1", "S2"], "Deletion stability"],
     [["C1", "C2", "C3"], "Structural controls"],
+    [["D1"], "Intent boundary"],
   ];
   const semanticNavigation = semanticGroups.map(([ids, label]) => {
     const items = ids.map((id) => reviewCases.find((test) => test.id === id)).filter(Boolean).map((test) => {
@@ -1148,7 +1148,7 @@ function renderIndex(animationVersion) {
             <p><span>Expected result</span><b id="case-required"></b></p>
           </div>
         </div>
-${renderC3HandoffGraph()}
+${renderIntentBoundaryGraph()}
       </section>
     </div>
   </main>
@@ -1178,9 +1178,9 @@ ${renderC3HandoffGraph()}
       ).join('');
       window.GRAPH_CASE = entry;
       window.renderGraphCase(figure, entry);
-      const proof = document.querySelector('#c3-proof');
-      proof.hidden = id !== 'C3';
-      window.renderProofGraphs(proof, id === 'C3' ? window.C3_PROOF_CASE : null);
+      const proof = document.querySelector('#intent-proof');
+      proof.hidden = id !== 'D1';
+      window.renderProofGraphs(proof, id === 'D1' ? window.INTENT_PROOF_CASE : null);
       document.querySelectorAll('[data-case]').forEach(link => link.setAttribute('aria-current', link.dataset.case === id ? 'true' : 'false'));
       if (updateHistory) history.replaceState(null, '', '#' + id);
     };

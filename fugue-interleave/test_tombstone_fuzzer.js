@@ -9,12 +9,14 @@ import { FugueMaxSimple as CurrentFugueMax } from "fugue-max-simple";
 import { FugueSimple } from "fugue-simple";
 import {
   checkBackwardNonInterleaving,
-  checkDeleteInsertCommutation,
+  checkSpliceLoweringEquivalence,
+  checkIntentBoundary,
   checkForwardNonInterleaving,
   checkLocalGhostNeutrality,
   checkReferencedTombstone,
   checkReverseROBuckets,
   checkStagedGhostNeutrality,
+  checkTransportStutter,
   generateTrace,
   replayWithInvisibleGhost,
   structuralBucket,
@@ -23,13 +25,12 @@ import {
 const START = "<start>";
 const END = "<end>";
 
-function publicationDoc(replicaID, savedState = null, localState = null) {
+function testDoc(replicaID, savedState = null) {
   const runtime = new CRuntime({ debugReplicaID: replicaID });
   const sends = [];
   runtime.on("Send", ({ message }) => sends.push(new Uint8Array(message)));
   const list = runtime.registerCollab("array", (init) => new CurrentFugueMax(init));
   if (savedState !== null) runtime.load(savedState);
-  if (localState !== null) list.loadLocalPublicationState(localState);
   return { runtime, list, sends };
 }
 
@@ -225,22 +226,40 @@ function synthetic(characters, logs) {
     0
   ), null);
 
-  // N7's commuting square holds author identities fixed while swapping only
-  // insert-before-B/delete-B. Canonical FugueMax keeps B as the coordinate.
-  // The current candidate is deliberately expected to expose its known
-  // handoff-timing defect until the replacement rule is redesigned.
-  assert.equal(checkDeleteInsertCommutation(
+  // N7 holds author identities fixed and compares two lowerings of one
+  // declared replacement. Published FugueMax has no explicit replacement
+  // boundary. The candidate's splice lowering must equal insert-before-delete
+  // over the same arbitrary settled prefix and concurrent witnesses.
+  assert.equal(checkSpliceLoweringEquivalence(
     PublishedFugueMax,
     trace,
     `${seed}/commutation/0`,
     0
-  ), null);
-  assert.equal(checkDeleteInsertCommutation(
+  )?.sensor, "splice-lowering-equivalence");
+  assert.equal(checkSpliceLoweringEquivalence(
     CurrentFugueMax,
     generateTrace(CurrentFugueMax, seed, options),
     `${seed}/commutation/0`,
     0
-  )?.sensor, "delete-insert-commutation");
+  ), null);
+  assert.equal(checkTransportStutter(
+    CurrentFugueMax,
+    generateTrace(CurrentFugueMax, seed, options),
+    `${seed}/transport-stutter/0`,
+    0
+  ), null);
+  assert.equal(checkIntentBoundary(
+    PublishedFugueMax,
+    trace,
+    `${seed}/intent-boundary/0`,
+    0
+  )?.sensor, "intent-boundary");
+  assert.equal(checkIntentBoundary(
+    CurrentFugueMax,
+    generateTrace(CurrentFugueMax, seed, options),
+    `${seed}/intent-boundary/0`,
+    0
+  ), null);
 
   // The outer-bucket clause is the opposite kind of check: published
   // FugueMax must preserve descending RO buckets over the same arbitrary base.
@@ -258,74 +277,26 @@ function synthetic(characters, logs) {
   )?.sensor, "reverse-ro-buckets");
 }
 
-// Publication metadata is local durable-outbox state, not replicated state.
-// Restoring it beside a shared snapshot must preserve N7's remembered gap;
-// restoring the shared snapshot alone deliberately uses the published-gap
-// projection. Captured watermarks also acknowledge only their own prefix.
+// Splice intent is fully lowered to ordinary immutable operations before the
+// transport sees it. No publication watermark or device-local semantic state
+// is needed, and the resulting snapshot survives an ordinary restart.
 {
-  const base = publicationDoc("base");
+  const base = testDoc("base");
   base.runtime.transact(() => base.list.insert(0, "A", "B"));
-  base.list.markLocalUpdatesSent();
   const baseSave = base.runtime.save();
 
-  const insertThenDelete = publicationDoc("replacement", baseSave);
-  insertThenDelete.runtime.transact(() => insertThenDelete.list.insert(1, "C"));
-  const beforeDeleteBucket = structuralBucket(insertThenDelete.sends.at(-1));
-  insertThenDelete.runtime.transact(() => insertThenDelete.list.delete(2));
+  const reference = testDoc("replacement", baseSave);
+  reference.runtime.transact(() => reference.list.insert(1, "C"));
+  const referenceBucket = structuralBucket(reference.sends.at(-1));
+  reference.runtime.transact(() => reference.list.delete(2));
 
-  const pendingDelete = publicationDoc("replacement", baseSave);
-  const staleLocalState = pendingDelete.list.saveLocalPublicationState();
-  pendingDelete.runtime.transact(() => pendingDelete.list.delete(1));
-  const deleteFrontier = pendingDelete.list.captureLocalPublicationFrontier();
-  const afterDeleteSave = pendingDelete.runtime.save();
-  const pendingState = pendingDelete.list.saveLocalPublicationState();
+  const declared = testDoc("replacement", baseSave);
+  declared.runtime.transact(() => declared.list.splice(1, 1, "C"));
+  assert.equal(structuralBucket(declared.sends.at(-1)), referenceBucket);
+  assert.deepEqual([...declared.list.values()], ["A", "C"]);
 
-  assert.throws(
-    () => publicationDoc("torn-new-shared", afterDeleteSave, staleLocalState),
-    /does not match/
-  );
-  assert.throws(
-    () => publicationDoc("torn-new-local", baseSave, pendingState),
-    /does not match/
-  );
-
-  assert.throws(
-    () => publicationDoc("replacement", afterDeleteSave, pendingState),
-    /fresh replica ID/
-  );
-
-  const restored = publicationDoc(
-    "replacement-after-restart",
-    afterDeleteSave,
-    pendingState
-  );
-  restored.runtime.transact(() => restored.list.insert(1, "C"));
-  const restoredBucket = structuralBucket(restored.sends.at(-1));
-  assert.equal(restoredBucket, beforeDeleteBucket);
-
-  const sharedStateOnly = publicationDoc(
-    "replacement-without-local-state",
-    afterDeleteSave
-  );
-  sharedStateOnly.runtime.transact(() => sharedStateOnly.list.insert(1, "C"));
-  assert.notEqual(structuralBucket(sharedStateOnly.sends.at(-1)), beforeDeleteBucket);
-
-  // Publishing the delete's captured prefix must leave the later C pending.
-  restored.list.markLocalUpdatesSent(deleteFrontier);
-  let publicationState = JSON.parse(
-    new TextDecoder().decode(restored.list.saveLocalPublicationState())
-  );
-  assert.equal(publicationState.pendingDeletes.length, 0);
-  assert.equal(publicationState.pendingInserts.length, 1);
-
-  // An old acknowledgement is harmless; a future one is invalid.
-  restored.list.markLocalUpdatesSent(0);
-  assert.throws(() => restored.list.markLocalUpdatesSent(999));
-  restored.list.markLocalUpdatesSent();
-  publicationState = JSON.parse(
-    new TextDecoder().decode(restored.list.saveLocalPublicationState())
-  );
-  assert.equal(publicationState.pendingInserts.length, 0);
+  const restored = testDoc("replacement-after-restart", declared.runtime.save());
+  assert.deepEqual([...restored.list.values()], ["A", "C"]);
 }
 
 console.log("generalized tombstone fuzzer: checker tests passed");

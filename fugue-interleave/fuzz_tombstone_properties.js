@@ -5,8 +5,8 @@
 // they do not generate N1/N2/etc. shapes. The default benchmark contains the
 // filtered visible defects published FugueMax actually fails: atomic-delivery
 // and staged-delivery ghost transformations. Repair-preservation controls are
-// a separate profile, including local structural normalization, N7's commuting
-// square, referenced-history preservation, and reverse-RO bucketing over
+// a separate profile, including local structural normalization, declared
+// splice lowering, referenced-history preservation, and reverse-RO bucketing over
 // arbitrary settled contexts.
 
 import { pathToFileURL } from "node:url";
@@ -77,7 +77,9 @@ function parseOptions(argv) {
     "ghost-neutrality",
     "staged-ghost-neutrality",
     "local-ghost-neutrality",
-    "delete-insert-commutation",
+    "transport-stutter",
+    "splice-lowering-equivalence",
+    "intent-boundary",
     "referenced-tombstone",
     "reverse-ro-buckets",
     "step-projection",
@@ -154,20 +156,20 @@ class Doc {
     return this.takeUpdate();
   }
 
+  splice(index, deleteCount, values) {
+    if (typeof this.list.splice !== "function") return null;
+    this.runtime.transact(() => this.list.splice(index, deleteCount, ...values));
+    return this.takeUpdate();
+  }
+
   receive(update) {
     this.runtime.receive(update);
   }
 
-  markSent() {
+  // Compatibility probe for the rejected publication-sensitive prototype.
+  // Current implementations intentionally expose no such semantic hook.
+  simulateTransportHandoff() {
     this.list.markLocalUpdatesSent?.();
-  }
-
-  capturePublicationFrontier() {
-    return this.list.captureLocalPublicationFrontier?.();
-  }
-
-  markSentThrough(frontier) {
-    this.list.markLocalUpdatesSent?.(frontier);
   }
 
   takeUpdate() {
@@ -223,7 +225,6 @@ class TraceWorld {
       key,
       actor,
       bytes,
-      publicationFrontier: doc.capturePublicationFrontier(),
       action: { kind: command.kind, token: command.token },
       dependencies: new Set(this.known.get(actor)),
       creationIndex: this.creationCounter++,
@@ -263,11 +264,8 @@ class TraceWorld {
     if (update === undefined || update.actor !== actor || update.handedOff) {
       throw new Error(`Illegal handoff of ${key} by ${actor}`);
     }
-    this.docs.get(actor).markSentThrough(update.publicationFrontier);
-    // The selected update is the outbox prefix boundary. Mark by the trace's
-    // own per-actor creation order instead of comparing CRDT-private frontier
-    // values; the latter are opaque tokens from the implementation under
-    // test, not part of the fuzzer's scheduling model.
+    // Handoff is transport scheduling only. It deliberately does not notify
+    // the CRDT or mutate insertion semantics.
     for (const candidate of this.updates.values()) {
       if (
         candidate.actor === actor &&
@@ -849,7 +847,7 @@ function checkStagedGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
   const ghostAuthor = clone(ghostAuthorID);
   const ghostInsert = ghostAuthor.insert(gap, ghostToken);
   // The insert is genuinely published before the deletion even exists.
-  ghostAuthor.markSent();
+  ghostAuthor.simulateTransportHandoff();
 
   const withGhostAuthor = clone(editorID);
   withGhostAuthor.receive(ghostInsert);
@@ -879,7 +877,7 @@ function checkStagedGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
   }
 
   const ghostDelete = ghostAuthor.delete(gap);
-  ghostAuthor.markSent();
+  ghostAuthor.simulateTransportHandoff();
   withGhostAuthor.receive(ghostDelete);
   const restoredVisible = baselineAuthor.values;
   if (!equal(withGhostAuthor.values, restoredVisible)) {
@@ -962,7 +960,7 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
   const rng = makeRng(trialSeed);
   const { initial, clone } = settledExtension(ListClass, trace);
   const gap = rng.integer(0, initial.length);
-  const run = (label, tombstoneAuthorID, witnessAuthorID, replacementAuthorID) => {
+  const run = (geometry, label, tombstoneAuthorID, witnessAuthorID, replacementAuthorID) => {
     const tombstoneToken = `referenced-tombstone-${trialIndex}-${label}`;
     const continuationToken = `referenced-continuation-${trialIndex}-${label}`;
     const witnessToken = `referenced-witness-${trialIndex}-${label}`;
@@ -970,7 +968,7 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
 
     const tombstoneAuthor = clone(tombstoneAuthorID);
     const tombstoneInsert = tombstoneAuthor.insert(gap, tombstoneToken);
-    tombstoneAuthor.markSent();
+    tombstoneAuthor.simulateTransportHandoff();
 
     const witnessAuthor = clone(witnessAuthorID);
     const witness = witnessAuthor.insert(gap, witnessToken);
@@ -978,11 +976,14 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
     const continuationAuthor = clone(`m-referenced-continuation-${trialIndex}-${label}`);
     continuationAuthor.receive(tombstoneInsert);
     // This is the decisive difference from a ghost: a live-period operation
-    // has LO=tombstoneToken and must retain its clumping position after delete.
-    const continuation = continuationAuthor.insert(gap + 1, continuationToken);
+    // structurally references the token as either its LO/parent or its RO.
+    const continuation = continuationAuthor.insert(
+      geometry === "LO" ? gap + 1 : gap,
+      continuationToken
+    );
 
     const tombstoneDelete = tombstoneAuthor.delete(gap);
-    tombstoneAuthor.markSent();
+    tombstoneAuthor.simulateTransportHandoff();
 
     const replacementAuthor = clone(replacementAuthorID);
     replacementAuthor.receive(tombstoneInsert);
@@ -1028,7 +1029,8 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
     const allSurvive = [continuationToken, witnessToken, replacementToken]
       .every((token) => xBeforeY.includes(token));
     return {
-      label,
+      label: `${geometry}-${label}`,
+      geometry,
       tombstoneToken,
       continuationToken,
       witnessToken,
@@ -1048,20 +1050,22 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
 
   // Both rank directions exercise the meaningful reference. When Y's author
   // did not know the in-flight X, no additional Y<X relation is required.
-  const assignments = [
+  const assignments = ["LO", "RO"].flatMap((geometry) => [
     run(
+      geometry,
       "tombstone-before-witness",
-      `z-referenced-tombstone-author-${trialIndex}`,
-      `m-referenced-witness-author-${trialIndex}`,
-      `a-referenced-replacement-author-${trialIndex}`
+      `z-referenced-tombstone-author-${trialIndex}-${geometry}`,
+      `m-referenced-witness-author-${trialIndex}-${geometry}`,
+      `a-referenced-replacement-author-${trialIndex}-${geometry}`
     ),
     run(
+      geometry,
       "witness-before-tombstone",
-      `a-referenced-tombstone-author-${trialIndex}`,
-      `m-referenced-witness-author-${trialIndex}`,
-      `z-referenced-replacement-author-${trialIndex}`
+      `a-referenced-tombstone-author-${trialIndex}-${geometry}`,
+      `m-referenced-witness-author-${trialIndex}-${geometry}`,
+      `z-referenced-replacement-author-${trialIndex}-${geometry}`
     ),
-  ];
+  ]);
   if (assignments.every(({ pass }) => pass)) return null;
   return failure("referenced-tombstone", trace, {
     trialSeed,
@@ -1071,11 +1075,11 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
     predecessor: gap === 0 ? START : initial[gap - 1],
     successor: gap === initial.length ? END : initial[gap],
     assignments,
-    expected: "a published tombstone remains a valid origin: deletion and late dependent delivery are pure insert/remove projections, and all legal delivery orders converge without reordering established survivors",
+    expected: "a published tombstone remains a valid LO or RO: deletion and late dependent delivery are pure insert/remove projections, and both tested causal delivery orders converge without reordering established survivors",
   });
 }
 
-function checkDeleteInsertCommutation(ListClass, trace, trialSeed, trialIndex) {
+function checkTransportStutter(ListClass, trace, trialSeed, trialIndex) {
   const rng = makeRng(trialSeed);
   const { initial, clone } = settledExtension(ListClass, trace);
   if (initial.length === 0) return null;
@@ -1103,30 +1107,28 @@ function checkDeleteInsertCommutation(ListClass, trace, trialSeed, trialIndex) {
       witnesses.push({ token, update, bucket: structuralBucket(update) });
     }
 
-    // History 1: insert immediately before the live target, then delete it.
+    // Keep the old live-gap lowering only as a diagnostic reference. The
+    // transport-stutter oracle compares the two delete-first branches below.
     const insertFirstAuthor = clone(commuterID);
     const beforeDeletion = insertFirstAuthor.insert(targetIndex, insertedToken);
     const deletionsAfter = targets.map((target) =>
       insertFirstAuthor.delete(insertFirstAuthor.values.indexOf(target))
     );
 
-    // History 2: delete the target, then insert at its former visible index.
-    // The replica ID and all concurrent witness IDs are held fixed; only the
-    // order of these two locally commuting commands changes.
+    // Delete the target, then insert at its former visible index.
     const deleteFirstAuthor = clone(commuterID);
     const deletionsBefore = targets.map(() =>
       deleteFirstAuthor.delete(targetIndex)
     );
     const afterDeletion = deleteFirstAuthor.insert(targetIndex, insertedToken);
 
-    // Same causal document actions, but the delete batch is handed to the
-    // transport before the insertion is generated. Transport flushing must
-    // not silently choose a different visible merge.
+    // Same document actions and observations, but insert an otherwise inert
+    // transport handoff between them. It must not change the generated op.
     const deleteFirstAfterHandoffAuthor = clone(commuterID);
     const deletionsBeforeHandoff = targets.map(() =>
       deleteFirstAfterHandoffAuthor.delete(targetIndex)
     );
-    deleteFirstAfterHandoffAuthor.markSent();
+    deleteFirstAfterHandoffAuthor.simulateTransportHandoff();
     const afterDeletionAndHandoff = deleteFirstAfterHandoffAuthor.insert(
       targetIndex,
       insertedToken
@@ -1177,11 +1179,11 @@ function checkDeleteInsertCommutation(ListClass, trace, trialSeed, trialIndex) {
     },
   ];
   const divergent = assignments.filter(({ result }) =>
-    !equal(result.insertThenDelete, result.deleteThenInsert) ||
-    !equal(result.insertThenDelete, result.deleteThenHandoffThenInsert)
+    !equal(result.deleteThenInsert, result.deleteThenHandoffThenInsert) ||
+    result.deleteFirstBucket !== result.deleteFirstAfterHandoffBucket
   );
   if (divergent.length === 0) return null;
-  return failure("delete-insert-commutation", trace, {
+  return failure("transport-stutter", trace, {
     trialSeed,
     trialIndex,
     commandIndex: trace.commands.length,
@@ -1193,7 +1195,245 @@ function checkDeleteInsertCommutation(ListClass, trace, trialSeed, trialIndex) {
     insertedToken,
     witnessTokens,
     assignments,
-    expected: "with replica IDs and concurrent witnesses fixed, inserting immediately before B then deleting B equals deleting B then inserting at B's former index under either transport-handoff schedule",
+    expected: "with document actions, observations, IDs, and witnesses fixed, inserting a transport handoff between delete and insert changes neither the emitted bucket nor the final visible order",
+  });
+}
+
+function checkSpliceLoweringEquivalence(ListClass, trace, trialSeed, trialIndex) {
+  const rng = makeRng(trialSeed);
+  const { initial, clone } = settledExtension(ListClass, trace);
+  if (initial.length === 0) return null;
+  const targetIndex = rng.integer(0, initial.length - 1);
+  const deleteCount = rng.integer(1, Math.min(3, initial.length - targetIndex));
+  const targets = initial.slice(targetIndex, targetIndex + deleteCount);
+  const predecessor = targetIndex === 0 ? START : initial[targetIndex - 1];
+  const successor = targetIndex + deleteCount === initial.length
+    ? END
+    : initial[targetIndex + deleteCount];
+  const replacementTokens = Array.from(
+    { length: rng.integer(1, 3) },
+    (_, index) => `splice-replacement-${trialIndex}-${index}`
+  );
+  const witnessTokens = Array.from(
+    { length: rng.integer(1, 3) },
+    (_, index) => `splice-witness-${trialIndex}-${index}`
+  );
+
+  const run = (replacementID, witnessPrefix) => {
+    const witnesses = witnessTokens.map((token, index) => {
+      const author = clone(`${witnessPrefix}-${trialIndex}-${index}`);
+      return author.insert(targetIndex, token);
+    });
+
+    // Reference lowering: create the replacement run while every target is
+    // live, then delete the targets by their shifted visible identities.
+    const reference = clone(replacementID);
+    const referenceUpdates = replacementTokens.map((token, index) =>
+      reference.insert(targetIndex + index, token)
+    );
+    for (const target of targets) {
+      referenceUpdates.push(reference.delete(reference.values.indexOf(target)));
+    }
+
+    // API lowering: one declared splice captures the same pre-edit gap and
+    // target identities. It is allowed to batch the ordinary primitives.
+    const declared = clone(replacementID);
+    const spliceUpdate = declared.splice(targetIndex, deleteCount, replacementTokens);
+    if (spliceUpdate === null) {
+      return { unsupported: true };
+    }
+
+    const merge = (suffix, updates) => {
+      const merged = clone(`merge-splice-${trialIndex}-${replacementID}-${suffix}`);
+      for (const witness of witnesses) merged.receive(witness);
+      for (const update of updates) merged.receive(update);
+      return merged.values;
+    };
+    const referenceResult = merge("reference", referenceUpdates);
+    const spliceResult = merge("declared", [spliceUpdate]);
+    const runIsAdjacent = (values) => {
+      const start = values.indexOf(replacementTokens[0]);
+      return start !== -1 && equal(
+        values.slice(start, start + replacementTokens.length),
+        replacementTokens
+      );
+    };
+    return {
+      unsupported: false,
+      referenceResult,
+      spliceResult,
+      referenceFirstBucket: structuralBucket(referenceUpdates[0]),
+      spliceFirstBucket: structuralBucket(spliceUpdate),
+      referenceAdjacent: runIsAdjacent(referenceResult),
+      spliceAdjacent: runIsAdjacent(spliceResult),
+    };
+  };
+
+  const assignments = [
+    {
+      label: "replacement IDs before witnesses",
+      result: run(`a-splice-${trialIndex}`, "z-splice-witness"),
+    },
+    {
+      label: "replacement IDs after witnesses",
+      result: run(`z-splice-${trialIndex}`, "a-splice-witness"),
+    },
+  ];
+  const divergent = assignments.some(({ result }) =>
+    result.unsupported ||
+    !equal(result.referenceResult, result.spliceResult) ||
+    result.referenceFirstBucket !== result.spliceFirstBucket ||
+    !result.referenceAdjacent ||
+    !result.spliceAdjacent
+  );
+  if (!divergent) return null;
+  return failure("splice-lowering-equivalence", trace, {
+    trialSeed,
+    trialIndex,
+    commandIndex: trace.commands.length,
+    predecessor,
+    targets,
+    deleteCount,
+    successor,
+    targetIndex,
+    replacementTokens,
+    witnessTokens,
+    assignments,
+    expected: "a declared splice and insert-run-before-delete lowering emit the same first structural bucket, converge to the same visible order, and keep the replacement run adjacent",
+  });
+}
+
+/**
+ * Generalized D1: the same locally visible post-delete state cannot infer
+ * whether an insertion is ordinary current-gap content or a replacement in
+ * the deleted target's historical slot. A late RO=target insertion makes the
+ * two valid meanings observable without permitting either branch to reorder.
+ */
+function checkIntentBoundary(ListClass, trace, trialSeed, trialIndex) {
+  const rng = makeRng(trialSeed);
+  const { initial, clone } = settledExtension(ListClass, trace);
+  const gap = rng.integer(0, initial.length);
+  const targetToken = `intent-target-${trialIndex}`;
+  const currentToken = `intent-current-${trialIndex}`;
+  const lateToken = `intent-late-ro-${trialIndex}`;
+  const editToken = `intent-edit-${trialIndex}`;
+
+  const run = (label, lateID, editID, currentID) => {
+    const targetAuthor = clone(`q-intent-target-${trialIndex}-${label}`);
+    const target = targetAuthor.insert(gap, targetToken);
+
+    // X is authored from the ghost-free current gap.
+    const currentAuthor = clone(currentID);
+    const current = currentAuthor.insert(gap, currentToken);
+
+    // M saw the target live and keeps RO=target, but is unknown to the editor.
+    const lateAuthor = clone(lateID);
+    lateAuthor.receive(target);
+    const late = lateAuthor.insert(gap, lateToken);
+
+    // Ordinary branch: delete the target and insert in the projected gap.
+    const ordinaryAuthor = clone(editID);
+    ordinaryAuthor.receive(target);
+    const deletion = ordinaryAuthor.delete(gap);
+    const ordinary = ordinaryAuthor.insert(gap, editToken);
+
+    // Replacement branch: canonical lowering of explicit intent. Insert in
+    // the target's live slot, then delete the captured target.
+    const replacementAuthor = clone(editID);
+    replacementAuthor.receive(target);
+    const replacement = replacementAuthor.insert(gap, editToken);
+    const replacementDelete = replacementAuthor.delete(gap + 1);
+
+    const replay = (suffix, updates) => {
+      const merged = clone(`merge-intent-${trialIndex}-${label}-${suffix}`);
+      for (const update of updates) merged.receive(update);
+      return merged.values;
+    };
+
+    const ordinaryBeforeLate = replay("ordinary-before-late", [
+      target, current, deletion, ordinary,
+    ]);
+    const ordinaryLateLast = replay("ordinary-late-last", [
+      target, current, deletion, ordinary, late,
+    ]);
+    const ordinaryLateFirst = replay("ordinary-late-first", [
+      current, target, late, deletion, ordinary,
+    ]);
+    const replacementBeforeLate = replay("replacement-before-late", [
+      target, current, replacement, replacementDelete,
+    ]);
+    const replacementLateLast = replay("replacement-late-last", [
+      target, current, replacement, replacementDelete, late,
+    ]);
+    const replacementLateFirst = replay("replacement-late-first", [
+      current, target, late, replacement, replacementDelete,
+    ]);
+
+    const removeLate = (values) => removeToken(values, lateToken);
+    const ordinaryStable = equal(
+      ordinaryBeforeLate,
+      removeLate(ordinaryLateLast)
+    );
+    const replacementStable = equal(
+      replacementBeforeLate,
+      removeLate(replacementLateLast)
+    );
+    const ordinaryBucket = structuralBucket(ordinary);
+    const replacementBucket = structuralBucket(replacement);
+    const currentBucket = structuralBucket(current);
+    const lateBucket = structuralBucket(late);
+
+    return {
+      label,
+      ordinaryBeforeLate,
+      ordinaryLateLast,
+      ordinaryLateFirst,
+      replacementBeforeLate,
+      replacementLateLast,
+      replacementLateFirst,
+      ordinaryBucket,
+      replacementBucket,
+      currentBucket,
+      lateBucket,
+      pass:
+        ordinaryBucket === currentBucket &&
+        replacementBucket === lateBucket &&
+        ordinaryBucket !== replacementBucket &&
+        ordinaryStable &&
+        replacementStable &&
+        equal(ordinaryLateLast, ordinaryLateFirst) &&
+        equal(replacementLateLast, replacementLateFirst),
+    };
+  };
+
+  const assignments = [
+    run(
+      "late-before-edit-before-current",
+      `a-intent-late-${trialIndex}`,
+      `m-intent-edit-${trialIndex}`,
+      `z-intent-current-${trialIndex}`
+    ),
+    run(
+      "current-before-edit-before-late",
+      `z-intent-late-${trialIndex}`,
+      `m-intent-edit-${trialIndex}`,
+      `a-intent-current-${trialIndex}`
+    ),
+  ];
+  if (assignments.every(({ pass }) => pass)) return null;
+  return failure("intent-boundary", trace, {
+    trialSeed,
+    trialIndex,
+    commandIndex: trace.commands.length,
+    gap,
+    predecessor: gap === 0 ? START : initial[gap - 1],
+    successor: gap === initial.length ? END : initial[gap],
+    targetToken,
+    currentToken,
+    lateToken,
+    editToken,
+    assignments,
+    expected: "ordinary insertion uses the current projected bucket, declared replacement uses the target's captured bucket, and late RO=target delivery reorders neither branch under either tested causal schedule",
   });
 }
 
@@ -1227,7 +1467,9 @@ function selected(options, sensor) {
   ]);
   const controls = new Set([
     "local-ghost-neutrality",
-    "delete-insert-commutation",
+    "transport-stutter",
+    "splice-lowering-equivalence",
+    "intent-boundary",
     "referenced-tombstone",
     "reverse-ro-buckets",
     "step-projection",
@@ -1253,7 +1495,9 @@ async function main() {
     ["ghost-neutrality", 0],
     ["staged-ghost-neutrality", 0],
     ["local-ghost-neutrality", 0],
-    ["delete-insert-commutation", 0],
+    ["transport-stutter", 0],
+    ["splice-lowering-equivalence", 0],
+    ["intent-boundary", 0],
     ["referenced-tombstone", 0],
     ["reverse-ro-buckets", 0],
     ["step-projection", 0],
@@ -1300,12 +1544,32 @@ async function main() {
         ));
       }
     }
-    if (selected(options, "delete-insert-commutation")) {
+    if (selected(options, "transport-stutter")) {
       for (let trial = 0; trial < options.commutationTrials; trial++) {
-        record(checkDeleteInsertCommutation(
+        record(checkTransportStutter(
+          ListClass,
+          trace,
+          `${traceSeed}/transport-stutter/${trial}`,
+          trial
+        ));
+      }
+    }
+    if (selected(options, "splice-lowering-equivalence")) {
+      for (let trial = 0; trial < options.commutationTrials; trial++) {
+        record(checkSpliceLoweringEquivalence(
           ListClass,
           trace,
           `${traceSeed}/commutation/${trial}`,
+          trial
+        ));
+      }
+    }
+    if (selected(options, "intent-boundary")) {
+      for (let trial = 0; trial < options.commutationTrials; trial++) {
+        record(checkIntentBoundary(
+          ListClass,
+          trace,
+          `${traceSeed}/intent-boundary/${trial}`,
           trial
         ));
       }
@@ -1382,7 +1646,9 @@ export {
   checkLocalGhostNeutrality,
   checkStagedGhostNeutrality,
   checkReferencedTombstone,
-  checkDeleteInsertCommutation,
+  checkTransportStutter,
+  checkSpliceLoweringEquivalence,
+  checkIntentBoundary,
   checkStepProjection,
   generateTrace,
   replayWithInvisibleGhost,

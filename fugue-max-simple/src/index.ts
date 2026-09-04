@@ -60,30 +60,6 @@ interface NodeSave<T> {
   rightOrigin?: ID | null;
 }
 
-interface LocalPublicationStateSave {
-  version: 1;
-  replicaID: string;
-  treeFingerprint: string;
-  nextSequence: number;
-  publishedThrough: number;
-  pendingInserts: [ID, number][];
-  pendingDeletes: [ID, number][];
-}
-
-function fingerprint(bytes: Uint8Array): string {
-  // Two independent 32-bit FNV-style streams. This is a torn-checkpoint
-  // detector, not a cryptographic authentication mechanism.
-  let first = 0x811c9dc5;
-  let second = 0x9e3779b9;
-  for (const byte of bytes) {
-    first = Math.imul(first ^ byte, 0x01000193) >>> 0;
-    second = Math.imul(second ^ byte, 0x85ebca6b) >>> 0;
-  }
-  return `${bytes.length}:${first.toString(16).padStart(8, "0")}:${second
-    .toString(16)
-    .padStart(8, "0")}`;
-}
-
 class Tree<T> {
   readonly root: Node<T>;
   /**
@@ -366,6 +342,33 @@ class Tree<T> {
     return this.nextNonDescendant(node);
   }
 
+  /**
+   * Returns the transitive structural support of all visible nodes.
+   *
+   * Parent and right-origin edges are immutable FugueMax dependencies. A dead
+   * node reached through either edge still participates in the position of
+   * surviving content; an unreachable dead node is observational history.
+   */
+  liveDependencyClosure(): Set<Node<T>> {
+    const closure = new Set<Node<T>>();
+    const pending: Node<T>[] = [];
+    for (const bySender of this.nodesByID.values()) {
+      for (const node of bySender) {
+        if (!node.isDeleted) pending.push(node);
+      }
+    }
+    while (pending.length !== 0) {
+      const node = pending.pop()!;
+      if (closure.has(node)) continue;
+      closure.add(node);
+      if (node.parent !== null) pending.push(node.parent);
+      if (node.rightOrigin !== undefined && node.rightOrigin !== null) {
+        pending.push(node.rightOrigin);
+      }
+    }
+    return closure;
+  }
+
   *traverse(node: Node<T>): IterableIterator<T> {
     // A recursive approach (like in the paper) would be simpler,
     // but overflows the stack at modest
@@ -428,10 +431,6 @@ class Tree<T> {
       });
     }
     return new Uint8Array(Buffer.from(JSON.stringify(save)));
-  }
-
-  fingerprint(): string {
-    return fingerprint(this.save());
   }
 
   load(saveData: Uint8Array) {
@@ -525,15 +524,6 @@ class Tree<T> {
 export class FugueMaxSimple<T> extends CPrimitive {
   private counter = 0;
   private tree: Tree<T>;
-  /**
-   * Local-only outbox state. Each locally generated primitive gets a
-   * monotonically increasing publication sequence. See
-   * captureLocalPublicationFrontier() and markLocalUpdatesSent().
-   */
-  private nextLocalPublicationSequence = 1;
-  private publishedThrough = 0;
-  private readonly localInsertPublication = new Map<Node<T>, number>();
-  private readonly localDeletePublication = new Map<Node<T>, number>();
 
   constructor(init: InitToken) {
     super(init);
@@ -547,16 +537,39 @@ export class FugueMaxSimple<T> extends CPrimitive {
     }
   }
 
+  /**
+   * Atomically expresses replacement intent at the list API boundary.
+   *
+   * Replacement insertions are anchored while the deleted range is still
+   * live, then the captured target nodes are tombstoned.  The emitted wire
+   * operations are ordinary FugueMax inserts and deletes; their coordinates
+   * therefore do not depend on transport handoff timing.
+   */
+  splice(startIndex: number, deleteCount = this.length - startIndex, ...values: T[]): void {
+    if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex > this.length) {
+      throw new Error("startIndex out of bounds");
+    }
+    if (!Number.isSafeInteger(deleteCount) || deleteCount < 0) {
+      throw new Error("deleteCount must be a nonnegative integer");
+    }
+    deleteCount = Math.min(deleteCount, this.length - startIndex);
+
+    // Capture identities, not shifted indices: inserting the replacement run
+    // first changes visible indices but must not change which nodes are removed.
+    const targets: Node<T>[] = [];
+    for (let i = 0; i < deleteCount; i++) {
+      targets.push(this.tree.getByIndex(this.tree.root, startIndex + i));
+    }
+
+    this.insert(startIndex, ...values);
+    for (const target of targets) this.deleteNode(target);
+  }
+
   private insertOne(index: number, value: T) {
-    // EXPERIMENTAL: Insert into the author's projected tree. A remotely deleted node is
-    // transparent: merely learning an already-dead node must not change the
-    // generated position. A previously published node with a pending local
-    // deletion remains a gap boundary, so "insert before B; delete B" and
-    // "delete B; insert in B's former gap" generate the same placement.
-    //
-    // The mutable input is the explicit local outbox epoch. This is a known
-    // semantic defect, not a final contract: N7 shows that handing a delete to
-    // transport before the following insert changes the emitted operation.
+    // Insert into the author's visible projection. Dead nodes are transparent
+    // when choosing new origins, so merely learning an already-dead node cannot
+    // change the emitted operation. They remain physically present in the
+    // replicated tree for existing and in-flight structural references.
     const id = { sender: this.runtime.replicaID, counter: this.counter };
     this.counter++;
     const leftOrigin =
@@ -564,15 +577,9 @@ export class FugueMaxSimple<T> extends CPrimitive {
         ? this.tree.root
         : this.tree.getByIndex(this.tree.root, index - 1);
 
-    const isUnpublished = (sequence: number | undefined) =>
-      sequence !== undefined && sequence > this.publishedThrough;
+    const liveDependencyClosure = this.tree.liveDependencyClosure();
     const isProjectedNode = (node: Node<T>) =>
-      !node.isDeleted ||
-      // A pending local delete of previously published content remembers the
-      // former gap for replacement typing (N7). If the insertion itself is
-      // still pending, insert+delete is a cancellable local ghost instead.
-      (isUnpublished(this.localDeletePublication.get(node)) &&
-        !isUnpublished(this.localInsertPublication.get(node)));
+      !node.isDeleted || liveDependencyClosure.has(node);
 
     // Find the next node after leftOrigin in the projected traversal. Skipped
     // tombstones are not erased from the replicated tree; they are ignored
@@ -617,145 +624,13 @@ export class FugueMaxSimple<T> extends CPrimitive {
     for (let i = 0; i < count; i++) this.deleteOne(startIndex);
   }
 
-  /**
-   * Returns a watermark covering exactly the local primitives generated so
-   * far. Capture this value when constructing an outgoing batch, then pass it
-   * to markLocalUpdatesSent after that batch is handed to the sync layer.
-   */
-  captureLocalPublicationFrontier(): number {
-    return this.nextLocalPublicationSequence - 1;
-  }
-
-  /**
-   * Marks a prefix of local operations as handed to the sync layer.
-   *
-   * With no argument this publishes every local operation generated so far,
-   * preserving the original flush-all convenience API. A captured frontier
-   * is safer for asynchronous or partially flushed outboxes: operations made
-   * after the batch was captured remain pending.
-   *
-   * Fugue cannot infer this boundary: delivery acknowledgements and network
-   * buffering live outside the CRDT. This experimental implementation uses
-   * the boundary anyway; the generalized N7 test documents why that is not a
-   * valid final source of document semantics.
-   */
-  markLocalUpdatesSent(
-    through: number = this.captureLocalPublicationFrontier()
-  ): void {
-    const current = this.captureLocalPublicationFrontier();
-    if (
-      !Number.isSafeInteger(through) ||
-      through < 0 ||
-      through > current
-    ) {
-      throw new Error(
-        `Invalid publication frontier ${through}; expected 0..${current}`
-      );
-    }
-    // A later prefix may be acknowledged before an older callback runs.
-    // Re-acknowledging the covered prefix is an idempotent no-op.
-    if (through <= this.publishedThrough) return;
-    this.publishedThrough = through;
-
-    // Published entries no longer affect insertion projection. Discarding
-    // them also bounds this local-only bookkeeping by the unsent outbox.
-    for (const [node, sequence] of this.localInsertPublication) {
-      if (sequence <= through) this.localInsertPublication.delete(node);
-    }
-    for (const [node, sequence] of this.localDeletePublication) {
-      if (sequence <= through) this.localDeletePublication.delete(node);
-    }
-  }
-
-  /**
-   * Saves the device-local publication frontier for a durable outbox.
-   * This byte string must stay local to the device; unlike savePrimitive(),
-   * it is not replicated document state.
-   */
-  saveLocalPublicationState(): Uint8Array {
-    const save: LocalPublicationStateSave = {
-      version: 1,
-      replicaID: this.runtime.replicaID,
-      treeFingerprint: this.tree.fingerprint(),
-      nextSequence: this.nextLocalPublicationSequence,
-      publishedThrough: this.publishedThrough,
-      pendingInserts: [...this.localInsertPublication].map(
-        ([node, sequence]) => [node.id, sequence]
-      ),
-      pendingDeletes: [...this.localDeletePublication].map(
-        ([node, sequence]) => [node.id, sequence]
-      ),
-    };
-    return new Uint8Array(Buffer.from(JSON.stringify(save)));
-  }
-
-  /**
-   * Restores publication state after the replicated CRDT snapshot has been
-   * loaded. The transport must restore its matching outgoing batches and
-   * captured watermarks at the same time.
-   */
-  loadLocalPublicationState(savedState: Uint8Array): void {
-    const save: LocalPublicationStateSave = JSON.parse(
-      Buffer.from(savedState).toString()
-    );
-    if (
-      save.version !== 1 ||
-      typeof save.replicaID !== "string" ||
-      save.replicaID === this.runtime.replicaID ||
-      typeof save.treeFingerprint !== "string" ||
-      !Number.isSafeInteger(save.nextSequence) ||
-      save.nextSequence < 1 ||
-      !Number.isSafeInteger(save.publishedThrough) ||
-      save.publishedThrough < 0 ||
-      save.publishedThrough >= save.nextSequence ||
-      !Array.isArray(save.pendingInserts) ||
-      !Array.isArray(save.pendingDeletes)
-    ) {
-      throw new Error(
-        save.replicaID === this.runtime.replicaID
-          ? "Restoring Fugue local state requires a fresh replica ID"
-          : "Invalid local publication state"
-      );
-    }
-    if (save.treeFingerprint !== this.tree.fingerprint()) {
-      throw new Error(
-        "Local publication state does not match the loaded Fugue snapshot"
-      );
-    }
-
-    const resolve = (entries: [ID, number][]): [Node<T>, number][] =>
-      entries.map(([id, sequence]) => {
-        if (
-          id === null ||
-          typeof id !== "object" ||
-          typeof id.sender !== "string" ||
-          !Number.isSafeInteger(id.counter) ||
-          !Number.isSafeInteger(sequence) ||
-          sequence <= save.publishedThrough ||
-          sequence >= save.nextSequence
-        ) {
-          throw new Error("Invalid pending publication entry");
-        }
-        return [this.tree.getByID(id), sequence];
-      });
-
-    const inserts = resolve(save.pendingInserts);
-    const deletes = resolve(save.pendingDeletes);
-    this.nextLocalPublicationSequence = save.nextSequence;
-    this.publishedThrough = save.publishedThrough;
-    this.localInsertPublication.clear();
-    this.localDeletePublication.clear();
-    for (const [node, sequence] of inserts) {
-      this.localInsertPublication.set(node, sequence);
-    }
-    for (const [node, sequence] of deletes) {
-      this.localDeletePublication.set(node, sequence);
-    }
-  }
-
   private deleteOne(index: number): void {
     // delete generator.
     const node = this.tree.getByIndex(this.tree.root, index);
+    this.deleteNode(node);
+  }
+
+  private deleteNode(node: Node<T>): void {
     const msg: DeleteMessage = { type: "delete", id: node.id };
     // Message is delivered to receivePrimitive ("on delivering" function).
     super.sendPrimitive(JSON.stringify(msg));
@@ -768,19 +643,13 @@ export class FugueMaxSimple<T> extends CPrimitive {
     const msg: InsertMessage<T> | DeleteMessage = JSON.parse(<string>message);
     switch (msg.type) {
       case "insert": {
-        const node = this.tree.addNode(
+        this.tree.addNode(
           msg.id,
           msg.value,
           this.tree.getByID(msg.parent),
           msg.side,
           msg.rightOrigin
         );
-        if (meta.isLocalOp) {
-          this.localInsertPublication.set(
-            node,
-            this.nextLocalPublicationSequence++
-          );
-        }
         // In a production implementation, we would emit an Insert event here.
         break;
       }
@@ -789,12 +658,6 @@ export class FugueMaxSimple<T> extends CPrimitive {
         // in the tree at the same position and remains a valid ordering
         // anchor for any node whose rightOrigin references it.
         const node = this.tree.getByID(msg.id);
-        if (meta.isLocalOp) {
-          this.localDeletePublication.set(
-            node,
-            this.nextLocalPublicationSequence++
-          );
-        }
         if (!node.isDeleted) {
           node.value = null;
           node.isDeleted = true;

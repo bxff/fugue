@@ -96,6 +96,10 @@ class Doc {
     this.runtime.transact(() => this.list.delete(index, 1));
   }
 
+  splice(index, deleteCount, value) {
+    this.runtime.transact(() => this.list.splice(index, deleteCount, value));
+  }
+
   apply(update) {
     this.runtime.receive(update.subarray(0, update.length - 1));
   }
@@ -110,7 +114,8 @@ class Doc {
     return update;
   }
 
-  markSent() {
+  // Compatibility probe for the rejected publication-sensitive prototype.
+  simulateTransportHandoff() {
     this.list.markLocalUpdatesSent?.();
   }
 
@@ -347,102 +352,61 @@ const cases = [
   },
   {
     id: "N7",
-    name: "insert-before-delete and delete-before-insert commute in the right-child geometry",
-    property: "visible-intent equivalence",
-    catches: "The concrete failure of 'RO = next live', plus the current candidate's transport-handoff dependence: RO=B vs RO=end yields AYMC vs AYCM.",
+    name: "a declared replacement keeps the pre-edit gap",
+    property: "splice lowering equivalence",
+    catches: "A next-live-only replacement lowering that moves C from B's reverse-RO bucket to the successor bucket.",
     diagram: [
       "shared AYB, with Y inserted in (A,B)",
-      "history 1: insert C in (Y,B), then delete B",
-      "history 2: delete B, then insert C after Y",
+      "reference lowering: insert C in (Y,B), then delete B",
+      "declared splice: capture the live (Y,B) gap, insert C there, then tombstone B",
       "concurrent M was inserted in (Y,B) while B was alive",
-      "required: for each fixed C/M sender assignment, both histories have the same result regardless of whether delete(B) was handed to sync before C",
+      "required: for each fixed C/M sender assignment, both lowerings have the same result; transport handoff is irrelevant",
     ],
     run() {
-      const world = (deleteFirst, cSender, mSender, handoffBeforeInsert = false) => {
+      const world = (useSplice, cSender, mSender) => {
         const base = new Doc("0");
         base.insert(0, "A"); const A = base.take();
         base.insert(1, "B"); const B = base.take();
         const y = new Doc("7"); y.applyAll([A, B]); y.insert(1, "Y"); const Y = y.take();
         const c = new Doc(cSender); c.applyAll([A, B, Y]);
-        let C, Bdel;
-        if (deleteFirst) {
-          c.delete(2); Bdel = c.take();
-          if (handoffBeforeInsert) c.markSent();
-          c.insert(2, "C"); C = c.take();
+        let replacement;
+        if (useSplice) {
+          c.splice(2, 1, "C"); replacement = c.take();
         } else {
-          c.insert(2, "C"); C = c.take();
-          c.delete(3); Bdel = c.take();
+          c.insert(2, "C"); const C = c.take();
+          c.delete(3); const Bdel = c.take();
+          replacement = [C, Bdel];
         }
         const m = new Doc(mSender); m.applyAll([A, B, Y]); m.insert(2, "M"); const M = m.take();
-        return { value: merge([A, B, Y, C, Bdel, M]), cOp: c.primitives.findLast((op) => op?.type === "insert") };
+        return {
+          value: merge([A, B, Y, ...[replacement].flat(), M]),
+          cOp: c.primitives.find((op) => op?.type === "insert"),
+        };
       };
       const assignments = [
         { label: "C=9, M=3", cSender: "9", mSender: "3" },
         { label: "C=3, M=9", cSender: "3", mSender: "9" },
       ].map(({ label, cSender, mSender }) => ({
         label,
-        insertFirst: world(false, cSender, mSender),
-        deleteFirst: world(true, cSender, mSender),
-        deleteFirstAfterHandoff: world(true, cSender, mSender, true),
+        reference: world(false, cSender, mSender),
+        splice: world(true, cSender, mSender),
       }));
-
-      // Also cover an established B authored earlier by the same replica
-      // that later replaces it. This distinguishes "same author" from an
-      // actual unsynced/cancellable insert-delete pair.
-      const ownTargetWorld = (deleteFirst, cSender, mSender, handoffBeforeInsert = false) => {
-        const c = new Doc(cSender);
-        c.insert(0, "A"); const A = c.take();
-        c.insert(1, "B"); const B = c.take();
-        c.markSent();
-        const y = new Doc("7-own");
-        y.applyAll([A, B]); y.insert(1, "Y"); const Y = y.take();
-        c.apply(Y);
-        let C, Bdel;
-        if (deleteFirst) {
-          c.delete(2); Bdel = c.take();
-          if (handoffBeforeInsert) c.markSent();
-          c.insert(2, "C"); C = c.take();
-        } else {
-          c.insert(2, "C"); C = c.take();
-          c.delete(3); Bdel = c.take();
-        }
-        const m = new Doc(mSender);
-        m.applyAll([A, B, Y]); m.insert(2, "M"); const M = m.take();
-        return {
-          value: merge([A, B, Y, C, Bdel, M]),
-          cOp: c.primitives.findLast((op) => op?.type === "insert"),
-        };
-      };
-      assignments.push(...[
-        { label: "C=9, M=3, C previously authored B", cSender: "9-own", mSender: "3-own" },
-      ].map(({ label, cSender, mSender }) => ({
-        label,
-        insertFirst: ownTargetWorld(false, cSender, mSender),
-        deleteFirst: ownTargetWorld(true, cSender, mSender),
-        deleteFirstAfterHandoff: ownTargetWorld(true, cSender, mSender, true),
-      })));
-      const pass = assignments.every(({ insertFirst, deleteFirst, deleteFirstAfterHandoff }) =>
-        insertFirst.value === deleteFirst.value &&
-        insertFirst.value === deleteFirstAfterHandoff.value
+      const pass = assignments.every(({ reference, splice }) =>
+        reference.value === splice.value
       );
       return predicateResult(
         pass,
-        "equal results for both command orders and both outbox-handoff schedules under each fixed sender assignment",
-        assignments.map(({ label, insertFirst, deleteFirst, deleteFirstAfterHandoff }) =>
-          `${label}: insert/delete ${JSON.stringify(insertFirst.value)}, delete/insert before handoff ${JSON.stringify(deleteFirst.value)}, delete/insert after handoff ${JSON.stringify(deleteFirstAfterHandoff.value)}`
+        "a declared splice equals the canonical insert-before-delete lowering under each fixed sender assignment",
+        assignments.map(({ label, reference, splice }) =>
+          `${label}: reference ${JSON.stringify(reference.value)}, splice ${JSON.stringify(splice.value)}`
         ).join("; "),
-        assignments.flatMap(({ label, insertFirst, deleteFirst, deleteFirstAfterHandoff }) => [
-          `${label} C before deletion: ${shape(insertFirst.cOp)}`,
-          `${label} C after deletion, before handoff: ${shape(deleteFirst.cOp)}`,
-          `${label} C after deletion, after handoff: ${shape(deleteFirstAfterHandoff.cOp)}`,
+        assignments.flatMap(({ label, reference, splice }) => [
+          `${label} reference C: ${shape(reference.cOp)}`,
+          `${label} splice C: ${shape(splice.cOp)}`,
         ]),
-        assignments.flatMap(({ label, insertFirst, deleteFirst, deleteFirstAfterHandoff }) => [
-          // The first world is the fixed-ID reference outcome. Each alternate
-          // schedule is judged against it independently so the diagram shows
-          // exactly which boundary introduces the variant.
-          { label: `${label} · insert then delete`, value: insertFirst.value, pass: true },
-          { label: `${label} · delete then insert before handoff`, value: deleteFirst.value, pass: insertFirst.value === deleteFirst.value },
-          { label: `${label} · delete then insert after handoff`, value: deleteFirstAfterHandoff.value, pass: insertFirst.value === deleteFirstAfterHandoff.value },
+        assignments.flatMap(({ label, reference, splice }) => [
+          { label: `${label} · insert then delete`, value: reference.value, pass: true },
+          { label: `${label} · declared splice`, value: splice.value, pass: reference.value === splice.value },
         ])
       );
     },
@@ -586,20 +550,20 @@ const cases = [
     id: "C3",
     name: "a tombstone with a live continuation remains a meaningful clumping boundary",
     property: "do not erase referenced history",
-    catches: "Physical/reference erasure, non-convergence, survivor reordering, and over-broad replacement clumping across the local outbox handoff.",
+    catches: "Physical/reference erasure, non-convergence, and survivor reordering when a dependent operation arrives after its origin was deleted.",
     diagram: [
       "shared AB; Z is typed after B while B is alive, so LO(Z)=B",
       "another peer deletes B and, without seeing Z, inserts Y after A",
-      "run both while delete(B) is still in the local outbox and after it is handed to the sync layer, with Y IDs on both sides of B's ID",
-      "required: same-outbox replacement is AYZ; after handoff, Z remains valid and Y insertion is a pure addition (AYZ or AZY)",
+      "run with Y IDs on both sides of B's ID and with irrelevant transport handoffs inserted",
+      "required: Z remains valid and Y insertion is a pure addition; AYZ and AZY are both permitted",
     ],
     run() {
-      const run = (ySender, handDeleteToSync) => {
+      const run = (ySender, withTransportStutter) => {
         const base = new Doc("4"); base.insert(0, "A"); const A = base.take(); base.insert(1, "B"); const B = base.take();
-        base.markSent();
+        base.simulateTransportHandoff();
         const z = new Doc("9"); z.applyAll([A, B]); z.insert(2, "Z"); const Z = z.take();
         const y = new Doc(ySender); y.applyAll([A, B]); y.delete(1); const Bdel = y.take();
-        if (handDeleteToSync) y.markSent();
+        if (withTransportStutter) y.simulateTransportHandoff();
         y.insert(1, "Y"); const Y = y.take();
         const beforeY = merge([A, B, Z, Bdel]);
         const value = merge([A, B, Z, Bdel, Y]);
@@ -612,17 +576,16 @@ const cases = [
         };
       };
       const histories = [
-        { label: "delete still in local outbox · Y sender 1", ...run("1", false) },
-        { label: "delete still in local outbox · Y sender 8", ...run("8", false) },
-        { label: "delete handed to sync · Y sender 1", ...run("1", true) },
-        { label: "delete handed to sync · Y sender 8", ...run("8", true) },
+        { label: "no intervening handoff · Y sender 1", ...run("1", false) },
+        { label: "no intervening handoff · Y sender 8", ...run("8", false) },
+        { label: "transport handoff inserted · Y sender 1", ...run("1", true) },
+        { label: "transport handoff inserted · Y sender 8", ...run("8", true) },
       ];
       return predicateResult(
-        histories.slice(0, 2).every(({ value }) => value === "AYZ") &&
-          histories.slice(2).every(({ value, stable }) =>
-            stable && (value === "AYZ" || value === "AZY")
-          ),
-        "same-outbox replacement is AYZ; after handoff to sync, late Z remains reachable and inserting Y does not reorder existing A/Z",
+        histories.every(({ value, stable }) =>
+          stable && (value === "AYZ" || value === "AZY")
+        ),
+        "late Z remains reachable and inserting Y does not reorder existing A/Z; transport handoff changes nothing",
         histories.map(({ label, value }) => `${label}: ${value}`).join(", "),
         histories.flatMap(({ label, yShape, zShape }) => [
           `${label} · Z: ${zShape}`,
@@ -631,10 +594,60 @@ const cases = [
         histories.map(({ label, value }) => ({
           label,
           value,
-          pass: label.startsWith("delete still in local outbox")
-            ? value === "AYZ"
-            : value === "AYZ" || value === "AZY",
+          pass: value === "AYZ" || value === "AZY",
         }))
+      );
+    },
+  },
+  {
+    id: "D1",
+    name: "late right-origin reference separates insertion from replacement",
+    property: "explicit-intent boundary",
+    catches: "The impossibility of making every raw delete-then-insert act like replacement while also preserving ghost neutrality, reverse-RO buckets, and insertion stability.",
+    diagram: [
+      "A and B are concurrent root siblings; X sees only A and inserts after it with RO=end",
+      "another author either inserts R before live B then deletes B (declared replacement), or deletes B then performs an ordinary projected insertion",
+      "M was inserted in (A,B) with RO=B but remains in flight until after R and X are visible",
+      "required: neither late M delivery may reorder existing R/X; the two explicit intents deliberately use different buckets",
+    ],
+    run() {
+      const a = new Doc("0-A"); a.insert(0, "A"); const A = a.take();
+      const b = new Doc("9-B"); b.insert(0, "B"); const B = b.take();
+      const x = new Doc("9-X"); x.apply(A); x.insert(1, "X"); const X = x.take();
+      const m = new Doc("0-M"); m.applyAll([A, B]); m.insert(1, "M"); const M = m.take();
+
+      const ordinary = new Doc("5-R"); ordinary.applyAll([A, B]);
+      ordinary.delete(1); const ordinaryDelete = ordinary.take();
+      ordinary.insert(1, "R"); const ordinaryR = ordinary.take();
+
+      const replacement = new Doc("5-R"); replacement.applyAll([A, B]);
+      replacement.insert(1, "R"); const replacementR = replacement.take();
+      replacement.delete(2); const replacementDelete = replacement.take();
+
+      const ordinaryPrefix = merge([A, B, X, ordinaryDelete, ordinaryR]);
+      const ordinaryLate = merge([A, B, X, ordinaryDelete, ordinaryR, M]);
+      const replacementPrefix = merge([A, B, X, replacementR, replacementDelete]);
+      const replacementLate = merge([A, B, X, replacementR, replacementDelete, M]);
+      const pass = ordinaryPrefix === "ARX" && ordinaryLate === "ARXM" &&
+        replacementPrefix === "AXR" && replacementLate === "AXMR" &&
+        ordinaryLate.replace("M", "") === ordinaryPrefix &&
+        replacementLate.replace("M", "") === replacementPrefix;
+      return predicateResult(
+        pass,
+        "ordinary insertion stays in the projected end bucket (ARX→ARXM), while declared replacement stays in B's captured bucket (AXR→AXMR); late M reorders neither prefix",
+        `ordinary ${JSON.stringify(ordinaryPrefix)}→${JSON.stringify(ordinaryLate)}; replacement ${JSON.stringify(replacementPrefix)}→${JSON.stringify(replacementLate)}`,
+        [
+          `ordinary R: ${shape(ordinary.primitives.findLast((op) => op?.type === "insert"))}`,
+          `replacement R: ${shape(replacement.primitives.find((op) => op?.type === "insert"))}`,
+          `late M: ${shape(m.primitives.at(-1))}`,
+          `X: ${shape(x.primitives.at(-1))}`,
+        ],
+        [
+          { label: "ordinary · before late M", value: ordinaryPrefix, pass: ordinaryPrefix === "ARX" },
+          { label: "ordinary · after late M", value: ordinaryLate, pass: ordinaryLate === "ARXM" },
+          { label: "replacement · before late M", value: replacementPrefix, pass: replacementPrefix === "AXR" },
+          { label: "replacement · after late M", value: replacementLate, pass: replacementLate === "AXMR" },
+        ]
       );
     },
   },
@@ -697,7 +710,12 @@ const decisions = {
   C3: {
     decision: "retained",
     role: "referenced-history control",
-    rationale: "B is meaningful because live Z has LO=B. A replacement typed while delete(B) is still in the local outbox keeps AYZ; after handoff, Z must remain reachable and converge. No universal Y-before-Z rule is part of C3.",
+    rationale: "B is meaningful because live Z has LO=B. B must remain a valid origin, late Z must remain reachable, and adding Y must not reorder existing survivors. No universal Y-before-Z rule is part of C3.",
+  },
+  D1: {
+    decision: "retained",
+    role: "design boundary",
+    rationale: "This is the minimal late-RO proof that raw delete/insert cannot simultaneously mean ordinary insertion and replacement. It justifies explicit splice intent rather than a transport or timing heuristic.",
   },
 };
 for (const test of cases) Object.assign(test, decisions[test.id]);
@@ -823,7 +841,7 @@ const visuals = {
     required: "Neither the presence nor the length of a dead chain may add a visible order.",
   },
   N7: {
-    question: "Why is simply replacing a deleted RO with the next live element not sufficient?",
+    question: "Does a declared replacement preserve the pre-edit gap instead of guessing from a later tombstone?",
     panels: [
       {
         title: "History A — insert C before deleting B",
@@ -836,17 +854,17 @@ const visuals = {
         ],
       },
       {
-        title: "History B — delete B before inserting C",
-        state: ["A", "Y", "B†"],
-        steps: ["delete B", "insert C after visible Y"],
+        title: "History B — one logical splice",
+        state: ["A", "Y", "B"],
+        steps: ["capture the live (Y,B) gap", "insert C", "delete captured B by ID"],
         origins: [
           { node: "Y", lo: "A", ro: "B†", note: "same shared insertion" },
-          { node: "C", lo: "Y", ro: "B†", note: "canonical tombstone-inclusive RO" },
+          { node: "C", lo: "Y", ro: "B†", note: "splice captures B before deleting it" },
           { node: "M", lo: "Y", ro: "B†", note: "same concurrent witness" },
         ],
       },
     ],
-    required: "For each fixed C/M sender assignment, all three schedules must agree. Swapping sender identities may change their common ID-tied order.",
+    required: "For each fixed C/M sender assignment, splice and insert-before-delete lowerings agree. Transport timing is not an input.",
   },
   S1: {
     question: "May deleting a right origin reorder surviving siblings that were already visible?",
@@ -943,7 +961,7 @@ const visuals = {
     required: "Both APQY and AYPQ are acceptable; APYQ is not, because LO(Q)=P.",
   },
   C3: {
-    question: "When an in-flight live Z depends on B, may handing delete(B) to sync erase B's clumping role before Z arrives?",
+    question: "When an in-flight live Z depends on B, does deleting B preserve Z and the order of existing survivors?",
     panels: [
       {
         title: "Continuation created while B is live",
@@ -953,23 +971,49 @@ const visuals = {
         ],
       },
       {
-        title: "Delete still in local outbox, then replacement Y",
+        title: "Delete B, then ordinary insertion Y",
         state: ["A", "Y", "B†"],
         steps: ["delete B without seeing Z", "insert Y after visible A"],
         origins: [
-          { node: "Y", lo: "A", ro: "B†", note: "Y occupies B's visible slot" },
+          { node: "Y", lo: "A", ro: "END", note: "Y cannot know that Z is still in flight" },
         ],
       },
       {
-        title: "Hand delete to sync, then replacement Y",
+        title: "Same edit with an irrelevant transport handoff",
         state: ["A", "Y", "B†"],
-        steps: ["delete B without seeing Z", "hand delete(B) to sync", "insert Y after visible A"],
+        steps: ["delete B without seeing Z", "transport handoff", "insert Y after visible A"],
         origins: [
           { node: "Y", lo: "A", ro: "END", note: "Y cannot know that Z is still in flight" },
         ],
       },
     ],
-    required: "Same-outbox replacement is AYZ. After the delete is handed to sync, AYZ and AZY are both valid; Z must survive and inserting Y must not reorder existing A/Z.",
+    required: "AYZ and AZY are both valid. Z must survive, existing A/Z order cannot move, and transport handoff cannot change Y's operation.",
+  },
+  D1: {
+    question: "Why can bare delete-then-insert not safely mean both ordinary insertion and replacement?",
+    panels: [
+      {
+        title: "Ordinary insertion into the visible projection",
+        state: ["A", "B†", "X"],
+        steps: ["X saw only A: RO=end", "delete B", "ordinary insert R: RO=end", "late M arrives with RO=B"],
+        origins: [
+          { node: "X", lo: "A", ro: "END", note: "already visible end-bucket sibling" },
+          { node: "R", lo: "A", ro: "END", note: "ordinary insertion ignores unsupported B†" },
+          { node: "M", lo: "A", ro: "B†", note: "in-flight reference created while B was live" },
+        ],
+      },
+      {
+        title: "Declared replacement using the captured gap",
+        state: ["A", "B", "X"],
+        steps: ["capture gap (A,B)", "insert R with RO=B", "delete B", "late M arrives with RO=B"],
+        origins: [
+          { node: "X", lo: "A", ro: "END", note: "end bucket stays before B bucket" },
+          { node: "R", lo: "A", ro: "B†", note: "explicit replacement chooses B's old slot" },
+          { node: "M", lo: "A", ro: "B†", note: "joins the same captured bucket" },
+        ],
+      },
+    ],
+    required: "Ordinary ARX→ARXM and replacement AXR→AXMR are separately stable. The caller must state which intent it means.",
   },
 };
 
@@ -1089,33 +1133,25 @@ const causalGraphs = {
   N7: {
     worlds: [
       {
-        title: "C=9, M=3 · insert C, then delete B",
+        title: "C=9, M=3 · canonical lowering",
         source: ["A", "Y", "B"],
+        annotation: "insert C at the live gap, then delete B",
         branches: [
           { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "C: LO=Y, RO=B" },
           { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
         ],
       },
       {
-        title: "C=9, M=3 · delete B, then insert C before handoff",
+        title: "C=9, M=3 · declared splice",
         source: ["A", "Y", "B"],
-        annotation: "C's peer deletes B first; M's peer still sees B alive",
+        annotation: "capture gap (Y,B), insert C there, then delete B by ID",
         branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "canonical C: LO=Y, RO=B† (next-live patch says end)" },
+          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "C: LO=Y, RO=B from the captured gap" },
           { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
         ],
       },
       {
-        title: "C=9, M=3 · delete B, hand off, then insert C",
-        source: ["A", "Y", "B"],
-        annotation: "only the transport handoff changes",
-        branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "candidate after handoff: LO=Y, RO=end; canonical: RO=B†" },
-          { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
-        ],
-      },
-      {
-        title: "C=3, M=9 · insert C, then delete B",
+        title: "C=3, M=9 · canonical lowering",
         source: ["A", "Y", "B"],
         annotation: "same commands, reversed relative sender order",
         branches: [
@@ -1124,47 +1160,11 @@ const causalGraphs = {
         ],
       },
       {
-        title: "C=3, M=9 · delete B, then insert C before handoff",
+        title: "C=3, M=9 · declared splice",
         source: ["A", "Y", "B"],
-        annotation: "IDs stay fixed relative to the preceding world",
+        annotation: "the captured gap is unchanged by sender ordering",
         branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "canonical C: LO=Y, RO=B† (next-live patch says end)" },
-          { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
-        ],
-      },
-      {
-        title: "C=3, M=9 · delete B, hand off, then insert C",
-        source: ["A", "Y", "B"],
-        annotation: "same handoff schedule with reversed sender order",
-        branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "candidate after handoff: LO=Y, RO=end; canonical: RO=B†" },
-          { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
-        ],
-      },
-      {
-        title: "C earlier published B · insert C, then delete B",
-        source: ["A", "Y", "B"],
-        annotation: "B and C share an author, but B crossed a sync boundary",
-        branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "C: LO=Y, RO=B" },
-          { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
-        ],
-      },
-      {
-        title: "C earlier published B · delete B, then insert C before handoff",
-        source: ["A", "Y", "B"],
-        annotation: "delete(B) is still in the local outbox, so B's established gap is remembered",
-        branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "C: LO=Y, RO=B† until delete(B) is handed to sync" },
-          { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
-        ],
-      },
-      {
-        title: "C earlier published B · delete B, hand off, then insert C",
-        source: ["A", "Y", "B"],
-        annotation: "the shipped adapter normally takes this path",
-        branches: [
-          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "candidate after handoff: LO=Y, RO=end; canonical: RO=B†" },
+          { actor: "C", view: ["A", "Y", "C", "B†"], from: ["Y", "B"], origin: "C: LO=Y, RO=B from the captured gap" },
           { actor: "M", view: ["A", "Y", "M", "B"], from: ["Y", "B"], origin: "M: LO=Y, RO=B" },
         ],
       },
@@ -1248,19 +1248,41 @@ const causalGraphs = {
   C3: {
     worlds: [
       {
-        title: "Delete still in local outbox when Y is typed",
+        title: "No transport event between delete and insert",
         source: ["A", "B"],
         branches: [
           { actor: "Z", view: ["A", "B", "Z"], from: ["B"], origin: "Z: LO=B, RO=end" },
-          { actor: "Y", view: ["A", "Y", "B†"], from: ["A", "B"], origin: "delete B; then Y: logical LO=A, RO=B†" },
+          { actor: "Y", view: ["A", "Y", "B†"], from: ["A"], origin: "delete B; ordinary Y: LO=A, RO=end" },
         ],
       },
       {
-        title: "Delete handed to sync before Y is typed",
+        title: "Irrelevant transport handoff inserted",
         source: ["A", "B"],
         branches: [
           { actor: "Z", view: ["A", "B", "Z"], from: ["B"], origin: "Z was authored while B was live and may still be in flight" },
-          { actor: "Y", view: ["A", "Y", "B†"], from: ["A", "B"], origin: "after handoff: Y has LO=A, RO=end; Z is unknown" },
+          { actor: "Y", view: ["A", "Y", "B†"], from: ["A"], origin: "same Y: LO=A, RO=end; transport is not semantic input" },
+        ],
+      },
+    ],
+  },
+  D1: {
+    worlds: [
+      {
+        title: "Ordinary post-delete insertion",
+        source: ["A", "B", "X"],
+        annotation: "B is unsupported when R is generated; M is still in flight",
+        branches: [
+          { actor: "R", view: ["A", "R", "B†", "X"], from: ["A"], origin: "ordinary R: LO=A, RO=end" },
+          { actor: "M", view: ["A", "M", "B"], from: ["A", "B"], origin: "late M: LO=A, RO=B" },
+        ],
+      },
+      {
+        title: "Declared replacement splice",
+        source: ["A", "B", "X"],
+        annotation: "R captures (A,B) while B is live; M is still in flight",
+        branches: [
+          { actor: "R", view: ["A", "R", "B†", "X"], from: ["A", "B"], origin: "replacement R: LO=A, RO=B" },
+          { actor: "M", view: ["A", "M", "B"], from: ["A", "B"], origin: "late M: LO=A, RO=B" },
         ],
       },
     ],

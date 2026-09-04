@@ -1,14 +1,14 @@
 # Phantom Barriers in FugueMax: Problem Statement
 
-> **NOTE (2026-09-03): this document is the historical problem statement and
+> **NOTE (2026-09-04): this document is the historical problem statement and
 > is partially stale.** It describes the old 3-part fix (RO shifting,
 > `replacementRightOrigin`, chain-hopper) as "the current implementation" —
 > that machinery was removed and replaced.
 > Problem 1 and Problem 2 below remain accurate descriptions of the
 > *phenomena*; the "What happens" paragraphs reflect the state of the old
 > fix and no longer describe the code. [`SOLUTION.md`](SOLUTION.md) records
-> both the projected-gap experiment and its known transport-handoff failure;
-> it is not a completed correction.
+> the current support-projection + explicit-splice candidate, its retained
+> semantic contract, and the proof work still required.
 
 ## Background
 

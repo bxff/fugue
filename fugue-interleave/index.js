@@ -60,6 +60,10 @@ class FugueCRDT {
     this.doc.transact(() => this.carray.delete(index, count));
   }
 
+  spliceArray(index, deleteCount, elems) {
+    this.doc.transact(() => this.carray.splice(index, deleteCount, ...elems));
+  }
+
   getArray() {
     return this.carray.slice();
   }
@@ -81,9 +85,7 @@ class FugueMaxSimpleCRDT {
     });
     if (updateHandler) {
       this.doc.on("Send", (e) => {
-        const frontier = this.carray?.captureLocalPublicationFrontier();
         updateHandler(this._encodeUpdate(e.message, false));
-        this.carray?.markLocalUpdatesSent(frontier);
       });
     }
     this.carray = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));

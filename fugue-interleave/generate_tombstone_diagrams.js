@@ -39,7 +39,7 @@ const requested = valuesFor("--implementation");
 const implementations = requested.length > 0
   ? requested.map(parseImplementation)
   : [
-      { label: "Support-projected FugueMax + splice", module: "fugue-max-simple" },
+      { label: "Tombstone-transparent FugueMax + splice", module: "fugue-max-simple" },
       { label: "Published FugueMax", module: "fugue-max-canonical", optional: true },
     ];
 const outputDir = resolve(here, valueFor("--out", "generated/tombstone-tests"));
@@ -241,13 +241,28 @@ function differingRange(values) {
 }
 
 function observationsFor(implementation, test, worldCount) {
-  const observations = resultFor(implementation, test.id).observations ?? [];
+  const result = resultFor(implementation, test.id);
+  const observations = result.observations ?? [];
+  const indices = test.visual.graph.observationIndices;
+  if (indices !== undefined) {
+    if (indices.length !== worldCount) {
+      throw new Error(`${test.id} has ${worldCount} graph worlds but ${indices.length} observation indices`);
+    }
+    return indices.map((index) => {
+      if (observations[index] === undefined) {
+        throw new Error(`${implementation.label}/${test.id} has no observation ${index}`);
+      }
+      return observations[index];
+    });
+  }
   if (observations.length === worldCount) return observations;
-  if (observations.length === 1 && worldCount === 1) return observations;
-  return new Array(worldCount).fill(null).map((_, index) => observations[index] ?? {
-    label: `World ${index + 1}`,
-    value: "?",
-  });
+  if (result.unsupported) {
+    return new Array(worldCount).fill(null).map((_, index) => ({
+      label: `World ${index + 1}`,
+      value: "?",
+    }));
+  }
+  throw new Error(`${implementation.label}/${test.id} has ${observations.length} observations for ${worldCount} graph worlds`);
 }
 
 function curve(x1, y1, x2, y2, color, marker = "arrowGraph", opacity = 1, width = 3.2) {
@@ -477,8 +492,15 @@ function animatedCaseData(test) {
         return {
           label: implementation.label,
           pass: branchPass,
+          status: result.unsupported
+            ? "N/A"
+            : result.contractDifference && !branchPass
+              ? "DIFFERS"
+              : undefined,
           value: observation.value,
-          highlight: branchPass ? null : (ranges[implementationIndex]?.[worldIndex] ?? null),
+          highlight: branchPass || result.unsupported
+            ? null
+            : (ranges[implementationIndex]?.[worldIndex] ?? null),
         };
       }),
     })),
@@ -712,7 +734,7 @@ function renderAnimationScript() {
       world.results.forEach((result, index) => {
         const y = mergeY + .075 + index * .085;
         const status = result.status || (result.pass ? 'PASS' : 'FAIL');
-        const statusColor = /UNVERIFIED/.test(status) ? COLORS.dim
+        const statusColor = /UNVERIFIED/.test(status) || status.includes('N/A') ? COLORS.dim
           : /PROPOSAL|\bERA\b/.test(status) ? '#d39b2a'
           : /DIFFERS|FORWARD NI|PUBLISHED/.test(status) ? '#4f9cf9'
           : result.pass ? COLORS.pass : COLORS.fail;
@@ -906,7 +928,7 @@ function renderIntentBoundaryGraph() {
         <div class="proof-cast" aria-label="Characters used in the example">
           <i><b>B</b> deleted boundary</i><i><b>X</b> end-bucket witness</i><i><b>M</b> late RO=B reference</i><i><b>R</b> inserted or replacement text</i>
         </div>
-        <div class="publication-key"><b>The replacer cannot know whether M exists.</b> Transport timing cannot resolve that missing intent. A splice captures B's live gap before deletion; an ordinary insertion projects through unsupported B†.</div>
+        <div class="publication-key"><b>The replacer cannot know whether M exists.</b> Transport timing cannot resolve that missing intent. A splice captures B's live gap before deletion; an ordinary insertion projects through B†.</div>
       </header>
       <div class="unified-proof-graph">
         <h3>Two declared meanings, each stable under late delivery</h3>
@@ -923,7 +945,7 @@ function renderIntentBoundaryGraph() {
       </div>
       <div class="proof-conclusion">
         <b>What D1 establishes</b>
-        <span>No algorithm can infer these two meanings from the same bare delete/insert calls while M is unknown. The corrected API must carry replacement intent explicitly; handoff, delay, and acknowledgement are never semantic inputs.</span>
+        <span>With identical bare calls and local state, immediate immutable emission cannot infer which meaning was intended while M is unknown. The corrected API carries replacement intent explicitly; handoff, delay, and acknowledgement are never semantic inputs.</span>
       </div>
       <script>window.INTENT_PROOF_CASE = ${data};</script>
     </section>`;
@@ -941,8 +963,10 @@ function renderIndex(animationVersion) {
   const semanticNavigation = semanticGroups.map(([ids, label]) => {
     const items = ids.map((id) => reviewCases.find((test) => test.id === id)).filter(Boolean).map((test) => {
       const dots = reports.map((implementation) => {
-        const pass = resultFor(implementation, test.id).pass;
-        return `<i class="dot ${pass ? "pass" : "fail"}" title="${escapeXml(implementation.label)}: ${pass ? "pass" : "fail"}"></i>`;
+        const result = resultFor(implementation, test.id);
+        const status = result.unsupported ? "na" : result.contractDifference ? "different" : result.pass ? "pass" : "fail";
+        const description = result.unsupported ? "not applicable" : result.contractDifference ? "differs from selected contract" : status;
+        return `<i class="dot ${status}" title="${escapeXml(implementation.label)}: ${description}"></i>`;
       }).join("");
       return `<a href="#${test.id}" data-case="${test.id}" class="${test.decision}"><b>${test.id}</b><span>${escapeXml(test.name)}</span><em>${dots}</em></a>`;
     }).join("");
@@ -953,11 +977,20 @@ function renderIndex(animationVersion) {
   const matrixHeader = reviewCases.map((test) => `<th><a href="#${test.id}" data-case="${test.id}" title="${escapeXml(test.role)}">${test.id}</a></th>`).join("");
   const matrixRows = reports.map((implementation) => {
     const cells = reviewCases.map((test) => {
-      const pass = resultFor(implementation, test.id).pass;
-      return `<td class="${pass ? "pass" : "fail"}" title="${escapeXml(test.id)}: ${pass ? "pass" : "fail"}">${pass ? "✓" : "×"}</td>`;
+      const result = resultFor(implementation, test.id);
+      const status = result.unsupported ? "na" : result.contractDifference ? "different" : result.pass ? "pass" : "fail";
+      const description = result.unsupported ? "not applicable" : result.contractDifference ? "differs from selected contract" : status;
+      return `<td class="${status}" title="${escapeXml(test.id)}: ${description}">${result.unsupported ? "—" : result.contractDifference ? "≠" : result.pass ? "✓" : "×"}</td>`;
     }).join("");
-    const passed = reviewCases.filter((test) => resultFor(implementation, test.id).pass).length;
-    return `<tr><th>${escapeXml(implementation.label)} <small>${passed}/${reviewCases.length}</small></th>${cells}</tr>`;
+    const results = reviewCases.map((test) => resultFor(implementation, test.id));
+    const passed = results.filter((result) => result.pass).length;
+    const failed = results.filter((result) => !result.pass && !result.unsupported && !result.contractDifference).length;
+    const unsupported = results.filter((result) => result.unsupported).length;
+    const differences = results.filter((result) => result.contractDifference).length;
+    const summary = failed === 0 && unsupported === 0 && differences === 0
+      ? `${passed}/${results.length}`
+      : `${failed} defects · ${unsupported} n/a · ${differences} contract difference`;
+    return `<tr><th>${escapeXml(implementation.label)} <small>${summary}</small></th>${cells}</tr>`;
   }).join("");
   const executableCaseData = Object.fromEntries(reviewCases.map((test) => [
     test.id,
@@ -984,6 +1017,9 @@ function renderIndex(animationVersion) {
     .fail { color: #c53b32; }
     .dot.pass, td.pass { background: #2ba66a; }
     .dot.fail, td.fail { background: #e15759; }
+    .na { color: #777; }
+    .dot.na, td.na { background: #aaa; }
+    .dot.different, td.different { background: #4f9cf9; }
     main { max-width: 1560px; margin: 0 auto; padding: 20px 30px 40px; }
     .matrix-wrap { overflow-x: auto; margin-bottom: 22px; padding-bottom: 5px; border-bottom: 1px solid #ddd; }
     .matrix { width: 100%; min-width: 650px; border-collapse: separate; border-spacing: 4px 3px; table-layout: fixed; }
@@ -1126,7 +1162,7 @@ function renderIndex(animationVersion) {
 <body>
   <header class="masthead">
     <h1>Tombstone invariance review</h1>
-    <div class="legend"><span><i class="dot pass"></i> property holds</span><span><i class="dot fail"></i> property fails</span></div>
+    <div class="legend"><span><i class="dot pass"></i> property holds</span><span><i class="dot fail"></i> published defect</span><span><i class="dot different"></i> contract difference</span><span><i class="dot na"></i> not applicable</span></div>
   </header>
   <main>
     <div class="matrix-wrap">
@@ -1201,10 +1237,14 @@ const animationScript = renderAnimationScript();
 const animationVersion = createHash("sha256").update(animationScript).digest("hex").slice(0, 12);
 writeFileSync(join(outputDir, "graph-animation.js"), animationScript);
 writeFileSync(join(outputDir, "index.html"), renderIndex(animationVersion));
+execFileSync(process.execPath, ["--check", join(outputDir, "graph-animation.js")]);
 
 process.stdout.write(`Generated the single-page tombstone review in ${outputDir}\n`);
 for (const implementation of reports) {
   const retained = implementation.report.cases.filter((test) => test.decision === "retained");
   const passed = retained.filter((test) => test.result.pass).length;
-  process.stdout.write(`  ${implementation.label}: ${passed}/${retained.length} retained requirements pass\n`);
+  const failed = retained.filter((test) => !test.result.pass && !test.result.unsupported && !test.result.contractDifference).length;
+  const unsupported = retained.filter((test) => test.result.unsupported).length;
+  const differences = retained.filter((test) => test.result.contractDifference).length;
+  process.stdout.write(`  ${implementation.label}: ${passed} hold, ${failed} fail, ${unsupported} not applicable, ${differences} contract differences\n`);
 }

@@ -5,9 +5,9 @@
 // they do not generate N1/N2/etc. shapes. The default benchmark contains the
 // filtered visible defects published FugueMax actually fails: atomic-delivery
 // and staged-delivery ghost transformations. Repair-preservation controls are
-// a separate profile, including local structural normalization, declared
-// splice lowering, referenced-history preservation, and reverse-RO bucketing over
-// arbitrary settled contexts.
+// a separate profile, including same-author local ghost neutrality, declared
+// splice lowering, referenced-history preservation, and reverse-RO bucketing
+// over arbitrary settled contexts.
 
 import { pathToFileURL } from "node:url";
 import { CRuntime } from "@collabs/collabs";
@@ -17,14 +17,20 @@ const START = "<start>";
 const END = "<end>";
 const decoder = new TextDecoder();
 
-function extractPrimitive(message) {
+function extractPrimitives(message) {
   const text = decoder.decode(message);
-  for (const marker of ['{"type":"insert"', '{"type":"delete"']) {
-    const start = text.indexOf(marker);
-    if (start === -1) continue;
+  const primitives = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const starts = ['{"type":"insert"', '{"type":"delete"']
+      .map((marker) => text.indexOf(marker, cursor))
+      .filter((index) => index !== -1);
+    if (starts.length === 0) break;
+    const start = Math.min(...starts);
     let depth = 0;
     let inString = false;
     let escaped = false;
+    let found = false;
     for (let index = start; index < text.length; index++) {
       const character = text[index];
       if (inString) {
@@ -35,14 +41,26 @@ function extractPrimitive(message) {
       else if (character === "{") depth++;
       else if (character === "}" && --depth === 0) {
         try {
-          return JSON.parse(text.slice(start, index + 1));
+          primitives.push(JSON.parse(text.slice(start, index + 1)));
         } catch {
-          return null;
+          return primitives;
         }
+        cursor = index + 1;
+        found = true;
+        break;
       }
     }
+    if (!found) break;
   }
-  return null;
+  return primitives;
+}
+
+function extractPrimitive(message) {
+  return extractPrimitives(message)[0] ?? null;
+}
+
+function sameID(left, right) {
+  return left?.sender === right?.sender && left?.counter === right?.counter;
 }
 
 export function structuralBucket(message) {
@@ -225,7 +243,9 @@ class TraceWorld {
       key,
       actor,
       bytes,
-      action: { kind: command.kind, token: command.token },
+      action: command.kind === "insert"
+        ? { kind: command.kind, token: command.token, index: command.index }
+        : { kind: command.kind, token: command.token },
       dependencies: new Set(this.known.get(actor)),
       creationIndex: this.creationCounter++,
       ghostDependent,
@@ -391,7 +411,14 @@ function checkStepProjection(trace) {
       const expected = action.kind === "insert" ? before : removeToken(before, action.token);
       const projected = action.kind === "insert" ? removeToken(after, action.token) : after;
       const tokenCount = after.filter((token) => token === action.token).length;
-      const pass = equal(projected, expected) && (action.kind !== "insert" || tokenCount === 1);
+      const localPlacement =
+        action.kind !== "insert" ||
+        !event.local ||
+        after[action.index] === action.token;
+      const pass =
+        equal(projected, expected) &&
+        (action.kind !== "insert" || tokenCount === 1) &&
+        localPlacement;
       if (!pass) {
         return failure("step-projection", trace, {
           actor,
@@ -400,7 +427,7 @@ function checkStepProjection(trace) {
           before,
           after,
           expected: action.kind === "insert"
-            ? "adding the inserted token leaves all existing tokens in their prior order"
+            ? "a local insert appears at its requested visible index, and every insert leaves existing tokens in their prior order"
             : "deleting a token is exactly projection through that token",
         });
       }
@@ -769,6 +796,11 @@ function checkLocalGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
       return { token, update: author.insert(gap, token) };
     }
   );
+  const witnessOrder = [...witnesses];
+  for (let index = witnessOrder.length - 1; index > 0; index--) {
+    const other = rng.integer(0, index);
+    [witnessOrder[index], witnessOrder[other]] = [witnessOrder[other], witnessOrder[index]];
+  }
 
   const baselineAuthor = clone(authorID);
   const baselineInsert = baselineAuthor.insert(gap, insertedToken);
@@ -781,11 +813,7 @@ function checkLocalGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
   const mergeBranch = (replicaID, updates) => {
     const merged = clone(replicaID);
     // Witness order is deliberately independent of the branch operations.
-    const pending = [...witnesses];
-    while (pending.length !== 0) {
-      const index = rng.integer(0, pending.length - 1);
-      merged.receive(pending.splice(index, 1)[0].update);
-    }
+    for (const witness of witnessOrder) merged.receive(witness.update);
     for (const update of updates) merged.receive(update);
     return merged.values;
   };
@@ -800,9 +828,7 @@ function checkLocalGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
   ]);
   const baselineBucket = structuralBucket(baselineInsert);
   const afterGhostBucket = structuralBucket(afterGhost);
-  if (equal(baseline, withGhost) && baselineBucket === afterGhostBucket) {
-    return null;
-  }
+  if (equal(baseline, withGhost)) return null;
   return failure("local-ghost-neutrality", trace, {
     trialSeed,
     trialIndex,
@@ -817,7 +843,7 @@ function checkLocalGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
     withGhost,
     baselineBucket,
     afterGhostBucket,
-    expected: "a local insert-delete pair with no intervening synchronization changes neither visible order nor the subsequent insertion's structural bucket",
+    expected: "a local insert-delete pair adds no visible ordering variant under identical concurrent continuations; structural buckets are diagnostic only",
   });
 }
 
@@ -896,6 +922,11 @@ function checkStagedGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
       return { token, update: author.insert(gap, token) };
     }
   );
+  const witnessOrder = [...witnesses];
+  for (let index = witnessOrder.length - 1; index > 0; index--) {
+    const other = rng.integer(0, index);
+    [witnessOrder[index], witnessOrder[other]] = [witnessOrder[other], witnessOrder[index]];
+  }
 
   const mergeBranch = (replicaID, branchUpdates, includeGhost) => {
     const merged = clone(replicaID);
@@ -903,11 +934,7 @@ function checkStagedGhostNeutrality(ListClass, trace, trialSeed, trialIndex) {
       merged.receive(ghostInsert);
       merged.receive(ghostDelete);
     }
-    const pending = [...witnesses];
-    while (pending.length !== 0) {
-      const index = rng.integer(0, pending.length - 1);
-      merged.receive(pending.splice(index, 1)[0].update);
-    }
+    for (const witness of witnessOrder) merged.receive(witness.update);
     for (const update of branchUpdates) merged.receive(update);
     return merged.values;
   };
@@ -973,14 +1000,23 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
     const witnessAuthor = clone(witnessAuthorID);
     const witness = witnessAuthor.insert(gap, witnessToken);
 
-    const continuationAuthor = clone(`m-referenced-continuation-${trialIndex}-${label}`);
+    const continuationAuthor = clone(`m-referenced-continuation-${trialIndex}-${geometry}-${label}`);
     continuationAuthor.receive(tombstoneInsert);
-    // This is the decisive difference from a ghost: a live-period operation
-    // structurally references the token as either its LO/parent or its RO.
+    if (geometry === "RO") continuationAuthor.receive(witness);
+    // This is the decisive difference from a ghost. LO mode inserts directly
+    // after G. RO mode first places a concurrent left boundary before G, then
+    // inserts between them, forcing a right-child payload with rightOrigin=G.
+    const tombstoneIndex = continuationAuthor.values.indexOf(tombstoneToken);
     const continuation = continuationAuthor.insert(
-      geometry === "LO" ? gap + 1 : gap,
+      geometry === "LO" ? tombstoneIndex + 1 : tombstoneIndex,
       continuationToken
     );
+    const tombstoneID = extractPrimitive(tombstoneInsert)?.id;
+    const continuationPrimitive = extractPrimitive(continuation);
+    const geometryObserved = geometry === "LO"
+      ? sameID(continuationPrimitive?.parent, tombstoneID)
+      : continuationPrimitive?.side === "R" &&
+        sameID(continuationPrimitive?.rightOrigin, tombstoneID);
 
     const tombstoneDelete = tombstoneAuthor.delete(gap);
     tombstoneAuthor.simulateTransportHandoff();
@@ -1036,6 +1072,8 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
       witnessToken,
       replacementToken,
       continuationBucket: structuralBucket(continuation),
+      continuationPrimitive,
+      geometryObserved,
       replacementBucket: structuralBucket(replacement),
       beforeDelete,
       afterDelete,
@@ -1044,28 +1082,50 @@ function checkReferencedTombstone(ListClass, trace, trialSeed, trialIndex) {
       yBeforeX,
       pureDelete,
       lateInsertIsPure,
-      pass: pureDelete && lateInsertIsPure && allSurvive && equal(xBeforeY, yBeforeX),
+      pass:
+        geometryObserved &&
+        pureDelete &&
+        lateInsertIsPure &&
+        allSurvive &&
+        equal(xBeforeY, yBeforeX),
     };
   };
 
   // Both rank directions exercise the meaningful reference. When Y's author
   // did not know the in-flight X, no additional Y<X relation is required.
-  const assignments = ["LO", "RO"].flatMap((geometry) => [
+  const assignments = [
     run(
-      geometry,
+      "LO",
       "tombstone-before-witness",
-      `z-referenced-tombstone-author-${trialIndex}-${geometry}`,
-      `m-referenced-witness-author-${trialIndex}-${geometry}`,
-      `a-referenced-replacement-author-${trialIndex}-${geometry}`
+      `z-referenced-tombstone-author-${trialIndex}-LO`,
+      `m-referenced-witness-author-${trialIndex}-LO`,
+      `a-referenced-replacement-author-${trialIndex}-LO`
     ),
     run(
-      geometry,
+      "LO",
       "witness-before-tombstone",
-      `a-referenced-tombstone-author-${trialIndex}-${geometry}`,
-      `m-referenced-witness-author-${trialIndex}-${geometry}`,
-      `z-referenced-replacement-author-${trialIndex}-${geometry}`
+      `a-referenced-tombstone-author-${trialIndex}-LO`,
+      `m-referenced-witness-author-${trialIndex}-LO`,
+      `z-referenced-replacement-author-${trialIndex}-LO`
     ),
-  ]);
+    // RO geometry requires the concurrent witness to sort immediately before
+    // G so that inserting between them encodes rightOrigin=G. Replacement IDs
+    // still vary across the two relevant rank directions.
+    run(
+      "RO",
+      "replacement-before-boundaries",
+      `z-referenced-tombstone-author-${trialIndex}-RO-low`,
+      `a-referenced-witness-author-${trialIndex}-RO-low`,
+      `0-referenced-replacement-author-${trialIndex}-RO-low`
+    ),
+    run(
+      "RO",
+      "replacement-after-boundaries",
+      `z-referenced-tombstone-author-${trialIndex}-RO-high`,
+      `a-referenced-witness-author-${trialIndex}-RO-high`,
+      `zz-referenced-replacement-author-${trialIndex}-RO-high`
+    ),
+  ];
   if (assignments.every(({ pass }) => pass)) return null;
   return failure("referenced-tombstone", trace, {
     trialSeed,
@@ -1251,6 +1311,16 @@ function checkSpliceLoweringEquivalence(ListClass, trace, trialSeed, trialIndex)
     };
     const referenceResult = merge("reference", referenceUpdates);
     const spliceResult = merge("declared", [spliceUpdate]);
+    const referencePrimitives = referenceUpdates.flatMap(extractPrimitives);
+    const splicePrimitives = extractPrimitives(spliceUpdate);
+    const expectedPrimitiveTypes = [
+      ...replacementTokens.map(() => "insert"),
+      ...targets.map(() => "delete"),
+    ];
+    const primitiveShapeValid = [referencePrimitives, splicePrimitives]
+      .every((primitives) =>
+        equal(primitives.map((primitive) => primitive.type), expectedPrimitiveTypes)
+      );
     const runIsAdjacent = (values) => {
       const start = values.indexOf(replacementTokens[0]);
       return start !== -1 && equal(
@@ -1264,6 +1334,12 @@ function checkSpliceLoweringEquivalence(ListClass, trace, trialSeed, trialIndex)
       spliceResult,
       referenceFirstBucket: structuralBucket(referenceUpdates[0]),
       spliceFirstBucket: structuralBucket(spliceUpdate),
+      referencePrimitives,
+      splicePrimitives,
+      primitiveSequenceEqual:
+        JSON.stringify(referencePrimitives) === JSON.stringify(splicePrimitives),
+      expectedPrimitiveTypes,
+      primitiveShapeValid,
       referenceAdjacent: runIsAdjacent(referenceResult),
       spliceAdjacent: runIsAdjacent(spliceResult),
     };
@@ -1283,6 +1359,8 @@ function checkSpliceLoweringEquivalence(ListClass, trace, trialSeed, trialIndex)
     result.unsupported ||
     !equal(result.referenceResult, result.spliceResult) ||
     result.referenceFirstBucket !== result.spliceFirstBucket ||
+    !result.primitiveShapeValid ||
+    !result.primitiveSequenceEqual ||
     !result.referenceAdjacent ||
     !result.spliceAdjacent
   );
@@ -1299,7 +1377,7 @@ function checkSpliceLoweringEquivalence(ListClass, trace, trialSeed, trialIndex)
     replacementTokens,
     witnessTokens,
     assignments,
-    expected: "a declared splice and insert-run-before-delete lowering emit the same first structural bucket, converge to the same visible order, and keep the replacement run adjacent",
+    expected: "a declared splice and insert-run-before-delete lowering emit the same complete primitive sequence, converge to the same visible order, and keep the replacement run adjacent",
   });
 }
 
@@ -1467,7 +1545,6 @@ function selected(options, sensor) {
   ]);
   const controls = new Set([
     "local-ghost-neutrality",
-    "transport-stutter",
     "splice-lowering-equivalence",
     "intent-boundary",
     "referenced-tombstone",

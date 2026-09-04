@@ -157,7 +157,7 @@
       world.results.forEach((result, index) => {
         const y = mergeY + .075 + index * .085;
         const status = result.status || (result.pass ? 'PASS' : 'FAIL');
-        const statusColor = /UNVERIFIED/.test(status) ? COLORS.dim
+        const statusColor = /UNVERIFIED/.test(status) || status.includes('N/A') ? COLORS.dim
           : /PROPOSAL|ERA/.test(status) ? '#d39b2a'
           : /DIFFERS|FORWARD NI|PUBLISHED/.test(status) ? '#4f9cf9'
           : result.pass ? COLORS.pass : COLORS.fail;

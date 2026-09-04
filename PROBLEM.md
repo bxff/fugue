@@ -7,7 +7,7 @@
 > Problem 1 and Problem 2 below remain accurate descriptions of the
 > *phenomena*; the "What happens" paragraphs reflect the state of the old
 > fix and no longer describe the code. [`SOLUTION.md`](SOLUTION.md) records
-> the current support-projection + explicit-splice candidate, its retained
+> the current tombstone-transparent projection + explicit-splice candidate, its retained
 > semantic contract, and the proof work still required.
 
 ## Background

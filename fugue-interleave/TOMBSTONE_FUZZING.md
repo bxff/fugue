@@ -16,7 +16,7 @@ The retained suite has three distinct roles:
 
 | Cases | Role |
 |---|---|
-| N1-N5 | Published FugueMax defects: unsupported insert/delete history adds visible variants |
+| N1-N5 | Published FugueMax defects: abstractly inert insert/delete history adds visible variants |
 | N7 and D1 | Define the required distinction between declared replacement and ordinary insertion |
 | S1-S2, C1-C3 | Controls that a repair must preserve: stability, clumping, non-interleaving, and referenced history |
 
@@ -57,7 +57,7 @@ schedule. They are compared after the injection and after every later base
 event:
 
 ~~~text
-visible(baseline) = visible(with unsupported dead ghost)
+visible(baseline) = visible(with an extra dead ghost)
 ~~~
 
 No expected output string or N-case shape is used. This discovers the root,
@@ -70,7 +70,7 @@ This varies the lifecycle without changing the semantic premise:
 
 ~~~text
 insert G; publish/deliver G
-observer creates no surviving structural reference to G
+observer makes no abstract edit targeting G or a gap incident on live G
 delete G; publish/deliver delete(G)
 observer performs the same later insertion as in a G-free world
 ~~~
@@ -86,9 +86,12 @@ outbox” is neither required nor meaningful to the algorithm.
 ### `local-ghost-neutrality`
 
 A local fresh insert/delete pair is added before the author's next insertion.
-The pair must change neither the next insertion's structural bucket nor its
-visible merge against fixed witnesses. This is a structural repair control, not
-a transport-state rule.
+The pair must not change its visible merge against fixed witnesses. Structural
+buckets are recorded as diagnostics, but are not the semantic oracle: another
+correct wire format could carry inert metadata while preserving visible order.
+The present search has not found a visible published-FugueMax counterexample,
+so this does not contribute to the published-defect score. It remains in the
+required candidate gate because same-author ghosts are part of the contract.
 
 ### `transport-stutter`
 
@@ -98,7 +101,10 @@ between the document actions. The emitted bucket and final order must agree.
 
 This sensor replaced the unsound raw “insert-delete equals delete-insert” rule.
 Those command sequences can encode different intents and are not generally
-equivalent.
+equivalent. It is currently an architectural regression probe for the rejected
+publication-handoff prototype, not evidence for the present implementations:
+neither exposes transport handoff as algorithm state. It therefore runs only
+when selected explicitly or under the `all` profile.
 
 ### `splice-lowering-equivalence`
 
@@ -120,17 +126,18 @@ declared:
   splice(index, targetCount, ...replacementRun)
 ~~~
 
-The two branches must emit the same first structural bucket, converge to the
-same visible order, and keep the replacement run adjacent. This generalizes N7
-without claiming that arbitrary raw commands commute.
+The two branches must emit the same complete primitive sequence, converge to
+the same visible order, and keep the replacement run adjacent. This generalizes
+N7 without claiming that arbitrary raw commands commute.
 
 ### `referenced-tombstone`
 
 The sensor creates a node G that becomes deleted while a surviving reference is
-in flight. It covers both direct dependency geometries:
+in flight. It covers both direct dependency geometries and verifies the emitted
+operation, not merely the intended setup:
 
-- parent/left-origin support: `LO(X)=G`; and
-- right-origin support: `RO(X)=G`.
+- parent/left-origin support: the primitive parent is G; and
+- right-origin support: the primitive is a right child with `rightOrigin=G`.
 
 It then varies delivery order and both relevant ID orientations. Deleting G must
 remove only G; late delivery must add only X; established survivors must not
@@ -148,7 +155,7 @@ gap it creates:
 
 - a fresh target B;
 - concurrent current-gap content X that never saw B;
-- ordinary R generated after deleting unsupported B;
+- ordinary R generated after deleting B;
 - replacement R generated in B's captured live slot; and
 - an in-flight insertion M with `RO(M)=B`.
 
@@ -175,8 +182,9 @@ loss of same-RO clumping.
 
 ### Stability and convergence controls
 
-- `step-projection`: one insert adds only its node and one delete removes only
-  its target; neither operation reorders prior survivors.
+- `step-projection`: a local insertion appears at its requested visible index,
+  one insert adds only its node, and one delete removes only its target; no
+  operation reorders prior survivors.
 - `forward-non-interleaving`: when the recorded causal observations prove an
   earliest left-origin continuation, it remains adjacent.
 - `convergence`: all settled replicas agree for one fixed operation set.
@@ -192,9 +200,10 @@ transitive order, and non-vacuous discovery behavior.
 
 - `published-bugs`: atomic and staged ghost-neutrality sensors—the visible
   defect score for published FugueMax.
-- `controls`: preservation properties and splice lowering.
-- `required`: the full candidate contract, excluding only the experimental
-  backward checker.
+- `controls`: preservation properties and splice lowering; the currently
+  vacuous transport-stutter probe is excluded.
+- `required`: the candidate contract gate; only transport-stutter and the
+  experimental backward probe are excluded.
 - `all`: everything, including experimental diagnostics.
 
 ## What the fuzzer establishes—and what it does not
@@ -208,19 +217,21 @@ settled prefix with targeted metamorphic motifs. Before a completion claim they
 must be broadened to:
 
 - bounded exhaustive small histories and every causal linearization;
-- longer alternating parent/right-origin support chains and nested left-child
+- longer alternating parent/right-origin dependency chains and nested left-child
   routes;
-- several staged tombstones whose support changes over time;
+- several staged tombstones whose dependents change over time;
 - restarts and save/load at arbitrary event cuts;
 - concurrent overlapping/multi-element splices and edits inside replaced
   ranges; and
 - a mutation suite proving each sensor rejects the specific broken strategy it
   is meant to detect.
 
-The true ghost premise is “no surviving structural operation depends on G,” not
-merely “no edit happened while G was visible.” An unrelated edit elsewhere is
-allowed. Conversely, an unseen in-flight reference makes G meaningful even if
-the deleting editor never observed that reference.
+Ghost equivalence is defined before CRDT lowering: after erasing G,
+corresponding abstract edits select the same retained target or visible gap. A
+structural dependency introduced by a broken lowering is the failure, not a
+premise that excludes the trace. An unrelated edit elsewhere is allowed.
+Conversely, an edit that explicitly targeted G or an incident gap while G was
+live makes it meaningful.
 
 ## Running it
 
@@ -245,18 +256,22 @@ node fuzz_tombstone_properties.js \
   --seed review-1 --traces 1000 --steps 40 --clients 4
 
 node fuzz_tombstone_properties.js \
+  --module fugue-max-simple \
   --sensor splice-lowering-equivalence \
   --traces 500 --commutation-trials 5
 
 node fuzz_tombstone_properties.js \
+  --module fugue-max-simple \
   --sensor referenced-tombstone \
-  --traces 500 --commutation-trials 5
+  --traces 500 --ghost-trials 5
 
 node fuzz_tombstone_properties.js \
+  --module fugue-max-simple \
   --sensor intent-boundary \
   --traces 500 --commutation-trials 5
 
 node fuzz_tombstone_properties.js \
+  --module fugue-max-simple \
   --sensor reverse-ro-buckets \
   --traces 500 --bucket-trials 5
 ~~~
@@ -268,7 +283,7 @@ seeds, so raising the search bound does not change earlier traces.
 
 With the repository's checked default bounds:
 
-- support-projected FugueMax + splice: zero failures in every required sensor;
+- tombstone-transparent FugueMax + splice: zero failures in every required sensor;
 - published FugueMax: reproducible atomic/staged ghost counterexamples and no
   `splice` API; and
 - ordinary FugueSimple: rejected by the reverse-RO non-vacuity control.

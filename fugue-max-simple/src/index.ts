@@ -342,33 +342,6 @@ class Tree<T> {
     return this.nextNonDescendant(node);
   }
 
-  /**
-   * Returns the transitive structural support of all visible nodes.
-   *
-   * Parent and right-origin edges are immutable FugueMax dependencies. A dead
-   * node reached through either edge still participates in the position of
-   * surviving content; an unreachable dead node is observational history.
-   */
-  liveDependencyClosure(): Set<Node<T>> {
-    const closure = new Set<Node<T>>();
-    const pending: Node<T>[] = [];
-    for (const bySender of this.nodesByID.values()) {
-      for (const node of bySender) {
-        if (!node.isDeleted) pending.push(node);
-      }
-    }
-    while (pending.length !== 0) {
-      const node = pending.pop()!;
-      if (closure.has(node)) continue;
-      closure.add(node);
-      if (node.parent !== null) pending.push(node.parent);
-      if (node.rightOrigin !== undefined && node.rightOrigin !== null) {
-        pending.push(node.rightOrigin);
-      }
-    }
-    return closure;
-  }
-
   *traverse(node: Node<T>): IterableIterator<T> {
     // A recursive approach (like in the paper) would be simpler,
     // but overflows the stack at modest
@@ -538,12 +511,14 @@ export class FugueMaxSimple<T> extends CPrimitive {
   }
 
   /**
-   * Atomically expresses replacement intent at the list API boundary.
+   * Expresses replacement intent at the list API boundary.
    *
    * Replacement insertions are anchored while the deleted range is still
    * live, then the captured target nodes are tombstoned.  The emitted wire
    * operations are ordinary FugueMax inserts and deletes; their coordinates
-   * therefore do not depend on transport handoff timing.
+   * therefore do not depend on transport handoff timing. Callers that require
+   * one batched runtime update must invoke this method inside one transaction,
+   * as the repository adapters do.
    */
   splice(startIndex: number, deleteCount = this.length - startIndex, ...values: T[]): void {
     if (!Number.isSafeInteger(startIndex) || startIndex < 0 || startIndex > this.length) {
@@ -577,9 +552,7 @@ export class FugueMaxSimple<T> extends CPrimitive {
         ? this.tree.root
         : this.tree.getByIndex(this.tree.root, index - 1);
 
-    const liveDependencyClosure = this.tree.liveDependencyClosure();
-    const isProjectedNode = (node: Node<T>) =>
-      !node.isDeleted || liveDependencyClosure.has(node);
+    const isProjectedNode = (node: Node<T>) => !node.isDeleted;
 
     // Find the next node after leftOrigin in the projected traversal. Skipped
     // tombstones are not erased from the replicated tree; they are ignored

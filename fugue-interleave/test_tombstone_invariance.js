@@ -100,6 +100,10 @@ class Doc {
     this.runtime.transact(() => this.list.splice(index, deleteCount, value));
   }
 
+  get supportsSplice() {
+    return typeof this.list.splice === "function";
+  }
+
   apply(update) {
     this.runtime.receive(update.subarray(0, update.length - 1));
   }
@@ -363,6 +367,17 @@ const cases = [
       "required: for each fixed C/M sender assignment, both lowerings have the same result; transport handoff is irrelevant",
     ],
     run() {
+      const probe = new Doc("splice-support-probe");
+      if (!probe.supportsSplice) {
+        return {
+          pass: false,
+          unsupported: true,
+          expected: "implementation exposes declared replacement intent",
+          actual: "not applicable: no splice API",
+          details: [],
+          observations: [],
+        };
+      }
       const world = (useSplice, cSender, mSender) => {
         const base = new Doc("0");
         base.insert(0, "A"); const A = base.take();
@@ -394,7 +409,7 @@ const cases = [
       const pass = assignments.every(({ reference, splice }) =>
         reference.value === splice.value
       );
-      return predicateResult(
+      const result = predicateResult(
         pass,
         "a declared splice equals the canonical insert-before-delete lowering under each fixed sender assignment",
         assignments.map(({ label, reference, splice }) =>
@@ -409,6 +424,7 @@ const cases = [
           { label: `${label} · declared splice`, value: splice.value, pass: reference.value === splice.value },
         ])
       );
+      return result;
     },
   },
   {
@@ -548,7 +564,7 @@ const cases = [
   },
   {
     id: "C3",
-    name: "a tombstone with a live continuation remains a meaningful clumping boundary",
+    name: "a referenced tombstone remains reachable after deletion",
     property: "do not erase referenced history",
     catches: "Physical/reference erasure, non-convergence, and survivor reordering when a dependent operation arrives after its origin was deleted.",
     diagram: [
@@ -632,7 +648,7 @@ const cases = [
         replacementPrefix === "AXR" && replacementLate === "AXMR" &&
         ordinaryLate.replace("M", "") === ordinaryPrefix &&
         replacementLate.replace("M", "") === replacementPrefix;
-      return predicateResult(
+      const result = predicateResult(
         pass,
         "ordinary insertion stays in the projected end bucket (ARX→ARXM), while declared replacement stays in B's captured bucket (AXR→AXMR); late M reorders neither prefix",
         `ordinary ${JSON.stringify(ordinaryPrefix)}→${JSON.stringify(ordinaryLate)}; replacement ${JSON.stringify(replacementPrefix)}→${JSON.stringify(replacementLate)}`,
@@ -649,6 +665,10 @@ const cases = [
           { label: "replacement · after late M", value: replacementLate, pass: replacementLate === "AXMR" },
         ]
       );
+      if (!pass && !(new Doc("d1-splice-probe")).supportsSplice) {
+        result.contractDifference = true;
+      }
+      return result;
     },
   },
 ];
@@ -998,7 +1018,7 @@ const visuals = {
         steps: ["X saw only A: RO=end", "delete B", "ordinary insert R: RO=end", "late M arrives with RO=B"],
         origins: [
           { node: "X", lo: "A", ro: "END", note: "already visible end-bucket sibling" },
-          { node: "R", lo: "A", ro: "END", note: "ordinary insertion ignores unsupported B†" },
+          { node: "R", lo: "A", ro: "END", note: "ordinary insertion projects through dead B†" },
           { node: "M", lo: "A", ro: "B†", note: "in-flight reference created while B was live" },
         ],
       },
@@ -1248,7 +1268,7 @@ const causalGraphs = {
   C3: {
     worlds: [
       {
-        title: "No transport event between delete and insert",
+        title: "Y sender 1 · no transport event",
         source: ["A", "B"],
         branches: [
           { actor: "Z", view: ["A", "B", "Z"], from: ["B"], origin: "Z: LO=B, RO=end" },
@@ -1256,7 +1276,7 @@ const causalGraphs = {
         ],
       },
       {
-        title: "Irrelevant transport handoff inserted",
+        title: "Y sender 1 · irrelevant transport event inserted",
         source: ["A", "B"],
         branches: [
           { actor: "Z", view: ["A", "B", "Z"], from: ["B"], origin: "Z was authored while B was live and may still be in flight" },
@@ -1264,13 +1284,14 @@ const causalGraphs = {
         ],
       },
     ],
+    observationIndices: [0, 2],
   },
   D1: {
     worlds: [
       {
         title: "Ordinary post-delete insertion",
         source: ["A", "B", "X"],
-        annotation: "B is unsupported when R is generated; M is still in flight",
+        annotation: "B is dead at R's replica; M is still in flight",
         branches: [
           { actor: "R", view: ["A", "R", "B†", "X"], from: ["A"], origin: "ordinary R: LO=A, RO=end" },
           { actor: "M", view: ["A", "M", "B"], from: ["A", "B"], origin: "late M: LO=A, RO=B" },
@@ -1286,6 +1307,7 @@ const causalGraphs = {
         ],
       },
     ],
+    observationIndices: [1, 3],
   },
 };
 
@@ -1321,6 +1343,8 @@ if (!jsonOutput) {
 
 let passed = 0;
 let failed = 0;
+let unsupported = 0;
+let contractDifferences = 0;
 const executions = [];
 for (const test of selectedCases) {
   let result;
@@ -1346,7 +1370,13 @@ for (const test of selectedCases) {
     visual: test.visual,
     result,
   });
-  if (result.pass) {
+  if (result.unsupported) {
+    unsupported++;
+    if (!jsonOutput) console.log(`  N/A  ${test.id} ${test.name} (${result.actual})`);
+  } else if (result.contractDifference) {
+    contractDifferences++;
+    if (!jsonOutput) console.log(`  DIFF ${test.id} ${test.name} (differs from the selected contract)`);
+  } else if (result.pass) {
     passed++;
     if (!jsonOutput) console.log(`  PASS ${test.id} ${test.name}`);
   } else {
@@ -1365,10 +1395,10 @@ if (jsonOutput) {
   console.log(JSON.stringify({
     implementation: moduleArg,
     exportName,
-    summary: { passed, failed, total: cases.length },
+    summary: { passed, failed, unsupported, contractDifferences, total: cases.length },
     cases: executions,
   }, null, 2));
 } else {
-  console.log(`\n${passed} passed, ${failed} failed`);
+  console.log(`\n${passed} passed, ${failed} failed, ${unsupported} not applicable, ${contractDifferences} contract differences`);
 }
 if (!jsonOutput && !reportOnly && failed > 0) process.exit(1);

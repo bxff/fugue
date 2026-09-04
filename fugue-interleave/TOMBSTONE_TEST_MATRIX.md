@@ -19,31 +19,31 @@ distinct semantic requirement beyond the cases below.
 
 ## Target contract
 
-The original defect is hidden-history variance, not ordinary convergence. For
-a history `H`, construct `H+G` by adding an insert/delete pair `G` that no
-compared surviving operation structurally references. `G` may have been
-published and temporarily visible, provided the observer made no operation from
-that live state before receiving its deletion. Recreate the same visible
-insertion intents with the same replica IDs. The required property is:
+The original defect is hidden-history variance, not ordinary convergence.
+Define `H` and `H+G` at the abstract editing level, before CRDT origins are
+generated. `H+G` additionally inserts and deletes G. After erasing G from every
+compared view, retained edits have the same authors and select the same retained
+token or gap between the same retained visible neighbours. No retained edit
+explicitly targets G or an incident gap while G is live. A bad lowering that
+later makes an edit structurally depend on G is the failure, not a premise that
+excludes the trace. The required property is:
 
 ```text
 visible(final(H)) = visible(final(H+G))
 ```
 
-This is subject to seven preservation rules:
+This is subject to five preservation rules:
 
 1. Reverse-right-origin clumping must still hold.
 2. A forward continuation `LO(q)=p` must not be split.
 3. Deletion alone must not reorder surviving content.
-4. A tombstone referenced by surviving content is meaningful history and
-   cannot be erased as though it were an unobserved ghost. This must remain
-   true when the reference is in flight and the delete was already published.
-5. Transport handoff alone must not change insertion semantics.
-6. A local insert-delete pair must not change the structural bucket of the
-   author's next insertion when no survivor depends on the pair.
-7. Ordinary insertion after deletion and replacement of deleted content are
+4. A tombstone referenced by surviving content must remain physically
+   addressable. This must remain true when the reference is in flight and the
+   delete was already published; it need not remain a barrier for future
+   ordinary insertion generation.
+5. Ordinary insertion after deletion and replacement of deleted content are
    distinct intents. Replacement must be declared and retain the pre-delete
-   slot; ordinary insertion must use the current supported visible gap.
+   slot; ordinary insertion must use the current visible gap.
 
 The suite separates these semantic comparisons from delivery-order
 convergence. Published FugueMax already converges for one fixed operation set;
@@ -198,7 +198,8 @@ required: Z survives; delete/insert steps do not reorder established survivors
 
 `B†` is meaningful because surviving `Z` depends on it. Treating every deleted
 node as physically disposable would lose Z or break convergence. B† therefore
-remains in the replicated support closure.
+remains physically present and resolvable, although ordinary insertion
+generation still projects through it.
 
 Either `AYZ` or `AZY` can be valid under different immutable ID/tree
 relationships. Y's author does not know in-flight Z and cannot use Z as an
@@ -216,7 +217,7 @@ M saw live B: M:(LO=A, RO=B), still in flight
 IDs M < R < X
 ```
 
-D cannot know whether M exists. Ordinary R uses the current supported gap
+D cannot know whether M exists. Ordinary R uses the current visible gap
 `(A,END)` and gives `ARX`, then `ARXM` when M arrives. Declared replacement R
 uses B's captured live slot `(A,B)` and gives `AXR`, then `AXMR`.
 
@@ -228,29 +229,34 @@ before or after the ordinary/replacement operation.
 
 ## Current results
 
-| Case | Published FugueMax | Support projection + splice |
+| Case | Published FugueMax | Tombstone-transparent projection + splice |
 |---|:---:|:---:|
 | N1 document-start ghost | fail | pass |
 | N2 interior RO barrier | fail | pass |
 | N3 original ABCD figure | fail | pass |
 | N4 left/right route | fail | pass |
 | N5 dead chain | fail | pass |
-| N7 declared splice lowering | unsupported | pass |
+| N7 declared splice lowering | not applicable (no splice API) | pass |
 | S1 deletion stability | pass | pass |
 | S2 chain deletion stability | pass | pass |
 | C1 reverse-RO clumping | pass | pass |
 | C2 forward continuation | pass | pass |
 | C3 referenced tombstone, parent and RO safety | pass | pass |
-| D1 ordinary insertion versus explicit replacement | fail | pass |
+| D1 ordinary insertion versus explicit replacement | differs from chosen ordinary-insert contract | pass |
 
-Published FugueMax passes 5/12 under the active contract; support-projected
-FugueMax with explicit splice passes 12/12. The generalized staged-ghost,
+Published FugueMax fails N1-N5, passes the five preservation controls, has no
+applicable N7 splice operation, and differs from the newly selected ordinary
+insertion contract in D1. Those roles are intentionally not collapsed into one
+pass fraction. Tombstone-transparent FugueMax with explicit splice passes
+12/12. The generalized staged-ghost,
 splice-lowering, reverse-RO, and referenced-tombstone sensors exercise lifecycle
 and structural boundaries beyond the hand-written cases.
 
-This is strong evidence for the candidate, not an exhaustive correctness proof.
-Bounded causal enumeration, deeper support chains, restart cuts, concurrent
-range splices, mutation testing, and formal proof remain open.
+This is strong finite evidence for the candidate, not an exhaustive correctness
+proof. The formal burden is limited to admissibility/convergence reduction,
+ghost erasure, and splice refinement. Bounded causal enumeration, deeper origin
+chains, restart cuts, concurrent range splices, and mutation testing remain
+engineering evidence to add.
 
 ## Why the rest was removed
 

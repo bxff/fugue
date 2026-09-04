@@ -1,245 +1,234 @@
-# Fugue-Era: the complete semantics of the tombstone-safe FugueMax
+# Projected-gap FugueMax experiment
 
-This is the complete specification of the design implemented in
-`fugue-max-simple/src/index.ts`. It is intended to be self-contained: one
-principle, one set of rules, one complete list of what the design gives and
-what it deliberately overrides. All claims are pinned by
-`fugue-interleave/test_solution.js` (32 scenarios, all delivery
-permutations, both sender assignments).
+> **Status (2026-09-04): not a completed or submission-ready correction.**
+> The projection itself repairs the remote phantom-barrier examples, but the
+> local remembered-gap rule below is transport-dependent. The same
+> `delete(B); insert(C)` edit emits a different insertion operation depending
+> only on whether `delete(B)` was handed to the sync layer first. The
+> strengthened N7 test and generalized commutation sensor expose this defect.
+> This file documents the experiment and the remaining design decision; it is
+> not a proof that FugueMax has been perfected.
 
-## The one principle
+This document describes the current tombstone-repair candidate in
+`fugue-max-simple/src/index.ts`. It replaces the rejected Fugue-Era design.
+The experiment is intentionally narrow: it removes ordering effects caused only by
+invisible insert-delete history, while retaining published FugueMax's tree,
+reverse-right-origin buckets, and non-interleaving behavior.
 
-**The document order is the order the authors believed they were writing
-in.** Each insert lands after everything its author knew was deleted and
-before everything its author believed alive. Where two authors had
-identical knowledge, a deterministic tie-break decides. A delete only
-toggles visibility — it never moves anything and never changes any insert's
-op. This extends FugueMax's intent-preserving placement from the visible
-list to the tombstone-inclusive list.
+## The two laws
 
-## The algorithm
+The implementation is designed around two metamorphic laws rather than one
+preferred example output.
 
-**Generation — canonical FugueMax, unchanged.** The insert op carries
-exactly the paper's payload: `(id, value, parent, side, rightOrigin)` with
-tombstone-inclusive origins. Consequently the op bytes are independent of
-which deletes the generator had synced (verified by the PAYLOAD SYNCHRONY
-test: four ops generated from different sync states and operation
-orderings are byte-identical). Deletes do not perturb the op graph of
-inserts at all.
+1. **Ghost neutrality.** If a token is inserted and deleted and no surviving
+   operation structurally references it, adding that history must not alter
+   the placement of later surviving edits. This includes a peer receiving the
+   insert and delete together, receiving the published insert and published
+   delete separately but making no intervening operation that references the
+   token, and a local insert-delete pair still in its outbox.
+2. **Replacement commutation.** With authors and concurrent operations fixed,
+   inserting `C` immediately before live `B` and then deleting `B` must agree
+   with deleting `B` and inserting `C` into `B`'s former gap. A transport
+   handoff between the two primitive commands must not change that result.
 
-**Delivery — derive the author's view from the op graph.** Each insert
-records its causal dot (transaction counter); each delete records its
-(sender, transaction counter) on the node. When an insert arrives, walk
-right from its canonical next node:
+These laws explain why neither of the old extremes works:
 
-1. cross every tombstone whose *delete* is in the op's causal past (the
-   author knew it deleted) — it becomes the era anchor;
-2. stop at the first node whose *insert* is in the causal past and whose
-   deletion is not (the author believed it alive) — the era-RO;
-3. skip anything concurrent (the author never saw it).
+- retaining every known tombstone as the next insert's structural boundary
+  violates ghost neutrality;
+- always using the next live right origin violates replacement commutation
+  (N7) and can move an insertion across a reverse-RO bucket.
 
-Then: no tombstone crossed → keep the canonical placement. Otherwise anchor
-after the whole known-dead chain — a right child of the anchor with the
-era-RO as right origin, or a left child of the era-RO when the era-RO is a
-descendant of the anchor (the anchor had right children in the author's
-view). Every decision reads only the op's causal past, so the placement is
-fixed the moment the op is placed — concurrent ops arriving later can
-never move it. Convergence is by construction; the tree is a pure function
-of the op set.
+## Local outbox state
 
-**Siblings — era class first, then reverse right origin, then
-(sender, counter).** Pre-deletion content precedes post-deletion content.
-Era must dominate reverse-RO: a post-era sibling's right origin can lie
-beyond a pre-era sibling's (UWZX), and the era principle must win.
-Same-era siblings keep the paper's reverse-RO/ID rules, so delete-free
-behavior is byte-identical to FugueMax.
+The CRDT tracks two local-only maps:
 
-## The guarantees (pinned by the suite)
+- local insertions not yet handed to the sync layer;
+- local deletions not yet handed to the sync layer.
 
-- **G1 — Intent preservation (strong list spec).** Every insert lands
-  between its generation-time visible neighbors. An author's explicit
-  position always wins over era layering (the pin test: typing *before*
-  pre-era content stays before it).
-- **G2 — Stability.** Deletes toggle visibility only. No origin is ever
-  rewritten, nothing is restructured on delete, and the order is a pure
-  function of the op graph.
-- **G3 — Era separation.** For two inserts into the same region, the author
-  who knew a deletion lands after the one who didn't — deterministically,
-  in every geometry: same-origin ties (AYC), right-side continuations
-  (azx), left-child collisions (ayzxm), whole-chain nesting (POINT 1),
-  stacked eras (ayq), mixed-era siblings with different right origins
-  (UWZX), layered knowledge stops, and concurrent double-deletes.
-  *Qualifier (pins dominate):* era ordering applies only between content
-  with no explicit position relation — an author who deliberately pins
-  their content (types before a specific element) keeps that pin (T8/T9).
-- **G4 — Un-edited runs stay contiguous.** Runs typed without an
-  intervening edit are never split (forward, backward, and post-era runs;
-  "a123789m", "AUVXYZ"). Delete-free scenarios are byte-identical to
-  canonical FugueMax.
-- **G5 — Determinism where knowledge differs.** Every ordering decided by
-  knowledge is independent of sender IDs and merge order — including
-  geometries where canonical is sender-dependent (layered stops,
-  double-deletes).
+The outbox handoff is represented by a monotonic local watermark. An application
+captures `captureLocalPublicationFrontier()` when it constructs an outgoing
+batch, then calls `markLocalUpdatesSent(frontier)` when that exact batch is
+handed to the sync layer. Calling `markLocalUpdatesSent()` without an argument
+is the convenient flush-all form. It must not be called merely because a local
+edit transaction ended.
 
-## The overrides — the complete list of departures from the paper's Definition 4
+Here “handed to the sync layer” means an irrevocable ownership transfer to the
+transport or durable outbox—not that a peer has already applied the bytes. The
+benchmark adapter treats its `updateHandler` callback as that transfer. An
+integration whose callback merely observes or temporarily buffers bytes must
+acknowledge the captured frontier later instead. Reading or serializing a
+snapshot never advances publication state.
 
-These are deliberate, stated once, and cover all delete geometries:
+The watermark matters for a real asynchronous outbox. If batch 1 is waiting
+while the user creates batch 2, publishing batch 1 must not accidentally mark
+batch 2's deletion as published. The old set-clearing prototype had exactly
+that ambiguity; acknowledging a captured prefix removes it.
 
-- **O1 — Forward non-interleaving yields to era separation.** When
-  pre-era content occupies a dead slot, it may sit between a post-era
-  continuation and its visible left origin. Two faces of one condition:
-  - POINT1-minus-m: `n` typed after deleting b,d → `aywn` (w, anchored in
-    the chain while alive, sits between y and n).
-  - **T1**: shared "ab"; author types p between a,b, backspaces b, types q;
-    concurrent y typed between a,b. Result: `apyq` when p's ID sorts after
-    y's, `aypq` otherwise. With b visible the intent order is `p y b q` —
-    every element sits exactly where its author put it relative to b's
-    tombstone; y correctly occupies the deleted slot. Canonical's `apqy`
-    misplaces q before b's tombstone. The visual adjacency of p,q is
-    ID-decided only because p vs y is a genuine same-knowledge tie; a
-    deterministic y-before-p is impossible without future knowledge (q
-    does not exist in p's causal past), so within G2 it is provably
-    unavoidable. This is not interleaving — it is correct placement of
-    slot content.
-  - **T1′ — era is the sync-robust side of the family.** Same keystrokes,
-    but the author received y *before* the backspace (screen "apyb" →
-    "apy" → "apyq"): era gives `apyq` again — the fixed point equal to the
-    informed author's own screen. Canonical gives `apyq` here too, but
-    `apqy` in T1 — so canonical's final document flips on whether y
-    happened to arrive before the backspace; era's does not. On this
-    family, era removes a delivery-timing dependence that canonical has.
-- **O2 — Backward non-interleaving takes an era exception.** Pre-era
-  content may be separated from its right origin by post-era content of a
-  different right origin (UWZX: x between z and w). This is the rebuilt
-  Lemma 5 exception: it fires exactly when the intervening element is
-  post-era of a deletion the separated element's author never saw.
-- **O3 — Same-origin ties are era-ordered, not ID-ordered.** The paper's
-  condition (3) is replaced by era class first; ID remains only within a
-  class. This is the entire fix to the phantom barrier and the only change
-  relative to the paper in tie-breaking.
-- **O4 — Order 1 vs Order 2 diverge by causal knowledge.** Typing c while b
-  is alive and then deleting b (Order 1) is a different op graph than
-  deleting b and then typing c (Order 2): Order 1's c ties with concurrent
-  y by ID (same knowledge); Order 2's c deterministically follows y. This
-  split is inherent to any era-faithful design and is required by the AYC
-  determinism itself.
-- No delete-free behavior changes. bdac (Point 3) is untouched and
-  correct as-is: same-origin concurrent inserts are ordered by ID because
-  no information exists to order them otherwise.
+This boundary cannot be inferred inside an operation-based CRDT. `sendPrimitive`
+means "give this update to the application's transport"; it does not say that a
+peer received it. Basing placement on guessed delivery or acknowledgement
+timing would itself create the timing-dependent variants the repair is intended
+to remove.
 
-## The impossibility proposition — why the price is forced
+The implemented experimental state machine for a dead node is (here “handed
+off” means handed to the local sync/transport layer, not acknowledged by a
+peer):
 
-**Proposition.** No algorithm satisfying the strong list specification
-guarantees both (A) *continuation adjacency* — an op whose visible left
-origin is ℓ and which is the only element with vLO = ℓ is consecutive with
-ℓ — and (B) *era separation* — pre-era slot content precedes post-era
-continuations — for all sender assignments.
+| Insert | Delete | Meaning to a new local insertion |
+|---|---|---|
+| still local | still local | cancellable ghost; transparent |
+| already handed off/remote | still local | remembered deleted gap; retained |
+| any | already handed off/remote | historical tombstone; transparent unless reached through live descendants |
 
-*Proof.* Ops a, b, p (peer 1 into (a,b)), y (peer 9 into (a,b)). Scenario
-A: peer 1 deletes b and types q (vLO = p). Scenario B: peer 9 deletes b
-and types q′ (vLO = y). The op subset {a,b,p,y} is literally identical in
-both scenarios, and a replica holding exactly it occurs in both;
-convergence forces one fixed display order for p,y there, and the strong
-list spec's single global order forbids the relative order of two visible
-elements from ever changing afterward. In A, (B)+(A)+spec (p ≺ q, y ≺ q,
-p adjacent q) force y ≺ p. In B, symmetrically, p ≺ y. Contradiction. ∎
+Thus a queued insert-delete pair cannot redirect later local operations, while
+a queued deletion of established content remembers exactly the gap needed for
+replacement typing. Once the deletion is handed off, later edits use the current
+visible gap; there is no permanent "era" attached to the tombstone.
 
-Consequences: canonical ("apqy") and era ("apyq") are the only two
-coherent designs on this family — there is no third. Escape routes are
-closed: tie-breaking with future knowledge is not measurable at
-placement, and revising the p/y order when q arrives violates the strong
-list spec itself (not merely P1) — even a fully re-keyed
-pure-function-of-op-set design would flip the visible order of committed
-characters and exit the Attiya specification. T1 is therefore the boundary
-every algorithm must sit on one side of; era's side is ghost-relative
-intent-correct in every element and is the sync-invariant fixed point
-(T1′), where canonical's side is delivery-timing-dependent.
+That last transition is the known flaw. Transport scheduling is not user edit
+intent. In the real adapters, every emitted update is handed off immediately,
+so ordinary backspace followed by typing normally takes the transparent branch
+and fails the N7 comparison. Delaying the callback makes the same edits pass.
 
-## Definition 4′ — era-aware maximal non-interleaving (formal specification)
+This is intended to cover a published insert that becomes irrelevant later. A
+recipient may see the insert alive for an arbitrary interval and cross arbitrary
+network boundaries. It may even edit elsewhere. If it creates no operation
+referencing that token during
+the interval, then after the separately published delete arrives its next
+insertion uses the same projected gap as a replica that never knew the token.
+Publication alone does not make a dead token a permanent boundary.
 
-**Era origins** (pure functions of an op's causal past; the delivery walk
-computes exactly these, established by the eragen/erarecv differential
-fuzz). For insert o with author view V(o): vLO(o) = visible predecessor;
-cRO(o) = successor of vLO(o) in V(o)'s tombstone-inclusive order. The
-known-dead chain K(o) = the maximal run t₁ = cRO(o), t₂, … of consecutive
-elements of V(o)'s full order such that some delete of each tᵢ is in
-past(o). Then **eraLO(o)** = t_k if k ≥ 1 else vLO(o); **eraRO(o)** = the
-successor of eraLO(o) in V(o)'s full order (first element not
-known-deleted; *end* if none); era bit e(o) = [k ≥ 1].
+## Projected insertion tree
 
-Facts: (F1) at insertion, eraLO(o) and o are consecutive in V(o)'s full
-order, and o ≺ eraRO(o); (F2) *causal monotonicity*: any op with o in its
-past also knows every delete in K(o) — era layering never runs backwards;
-(F3) same-(eraLO, eraRO) ops are pairwise concurrent, which makes the pin
-qualifier a theorem: pinned pairs never share a class, and explicitly
-pinned ops get e = 0 or route into the pinned node's subtree.
+Deletes never restructure the replicated FugueMax tree. They only mark nodes
+deleted; the device-local outbox state stays outside the replicated tree.
+When generating an insertion at visible index `i`:
 
-**The definition.** Strong list specification, plus, in the
-tombstone-inclusive order ≺:
+1. Find the visible predecessor `L` (or the root sentinel).
+2. Walk forward from `L` in the tombstone-inclusive FugueMax traversal.
+3. Ignore a dead node unless it is an established node whose locally generated
+   deletion has not yet been handed to the sync layer. Ignoring a node does not
+   ignore its descendants; live descendants remain meaningful positions.
+4. Let `R` be the first node that survives this projection, or end-of-list.
+5. If `R` is in `L`'s right subtree, encode the insertion as a left child of
+   `R`. Otherwise encode it as a right child of `L` with right origin `R`.
 
-- **(1′) Forward non-interleaving over era origins.** If A = eraLO(B) and
-  B appears ≺-earlier than any other element with eraLO = A, then A and B
-  are consecutive. *Ghost-slot corollary* (T1 and POINT1-minus-m as one
-  clause): for a post-era op B, every element strictly between vLO(B) and
-  B is one of: (i) a ghost in K(B); (ii) an element X with eraRO(X) ∈
-  K(B) (content anchored into the crossed slots); (iii) a descendant of a
-  (i)-, (ii)-, or (iv)-element; or (iv) an element X with eraRO(X)
-  at-or-beyond eraRO(B) in ≺ — pre-era content whose author believed the
-  list ended beyond B's stop, concurrent with B (example: x typed at the
-  end by an author who never saw the chain; B typed after the deletion
-  without seeing x; then x ≺ B with eraRO(x) = eraRO(B) = end; and v
-  typed between a and x by another author — a descendant of the
-  (iv)-element — likewise sits between vLO(B) and B). If no element
-  satisfies (i)–(iv), vLO(B) and B are consecutive among visible
-  elements.
-- **(2′) Backward non-interleaving with rebuilt exceptions.** If B =
-  eraRO(A) and A is the ≺-latest element with eraRO = B, then A,B are
-  consecutive, unless (i) the paper's Lemma-5 exception transplanted to
-  era origins, or (ii) *era intrusion*: a post-era element with the same
-  eraLO as A but larger stop separates them (UWZX's x between z and w).
-  Proving (i)–(ii) exhaustive is the Lemma-5-analog obligation.
-- **(3′) Sibling axiom.** Among elements with the same eraLO that are
-  unordered by (1′)/(2′): pre-era (e = 0) precede post-era (e = 1); within
-  the same era bit, roots of the eraRO forest in reverse-eraRO order;
-  remaining ties by full ID. Era separation is an axiom, exactly as the
-  paper's condition (3) was — it is not derivable from (1′)+(2′).
+The emitted insertion is an ordinary immutable FugueMax operation. Receivers do
+not repeat a knowledge-dependent walk and do not re-anchor it. Siblings use the
+published ordering exactly:
 
-**Constructive characterization** (what the implementation computes): (1)
-pre-order of the eraLO-tree; (2) same-eraLO elements by post-order of the
-eraRO forest (X child of Y iff eraRO(X) = Y within the group) — realized
-by the descendant branch, which routes pinned post-era ops into the stop
-node's left-descendant chain so the flat comparator only ever compares
-pin-free pairs; (3) forest roots: era bit, then reverse-eraRO, then full
-ID.
+- right children: reverse right-origin order, then immutable ID;
+- left children: immutable ID.
 
-**Proof roadmap.** Transfers essentially verbatim: the strong-list-spec
-theorem (the walk stops before the first known-alive node, so placement
-stays inside the visible gap); convergence (causal-past purity); Lemma 3
-with eraLO; the roots-pairwise-concurrent lemma. Needs genuine re-proof:
-Lemma 7's forward direction (its step "D is not causally later than A" is
-false for eraLO-siblings — T8's x1 is causally later than its sibling m;
-replacement: causally-related same-eraLO elements are always
-eraRO-forest-pinned, so post-order handles them and only roots need the
-concurrency argument); Lemma 8(a) in eraLO form (walk up to the first
-right-child link; its parent is the anchor — true by construction,
-including through left-descendant chains); Lemma 8(b) correspondence;
-Theorem 9 (existence) assembled from these; Theorem 10 (uniqueness) via
-the paper's scheme given (3′) as the explicit new axiom.
+Consequently delete-free executions use published FugueMax placement. Deletes
+never re-sort existing siblings.
 
-## Why the earlier alternatives failed (recorded for the correspondence)
+## Why the cases pass
 
-## Why the earlier alternatives failed (recorded for the correspondence)
+- **N1-N5 / generalized remote ghosts:** a received dead node is absent from
+  the insertion projection, including the left-child route and dead chains.
+- **Local ghost property:** a node present in both unpublished maps is absent
+  from the projection, so the next insertion gets the same structural bucket
+  as if the pair had never occurred.
+- **N7 / generalized replacement commutation:** the experiment passes only
+  while `delete(B)` remains in the local outbox. It fails after handoff because
+  `C` moves from B's bucket to the projected live-successor bucket. The test
+  covers both schedules, a `B` created earlier by the replacing author, and
+  deletion runs of length one to three.
+- **S1-S2:** deletion changes visibility only; no origin is rewritten and no
+  sibling array is re-sorted.
+- **C1:** the reverse-RO comparator is unchanged.
+- **C2:** no era bit can override FugueMax's tree and split `P -> Q`.
+- **C3:** skipping a tombstone does not discard its live descendants. A
+  same-outbox local replacement also retains the deleted gap until handoff.
 
-- **Canonical FugueMax** cannot see the knowledge difference (tombstone-
-  inclusive RO makes both eras byte-identical ops), so it ID-ties them:
-  phantom barrier (`acy`, `aqy`, `AXYZUV`), and in right-side geometries
-  Definition 4 actively forces post-before-pre (`axz`, `axyzm`).
-- **"RO = next live element"** erases the chain position that encodes
-  intent: it fixes none of the tie geometries (the left-child branch never
-  consults RO) and makes the same keystroke produce different trees by
-  operation order (`aymc` vs `aycm`).
-- **Generation-time era anchoring** (the previous iteration of this fix)
-  encodes the right rule but in the op, making payload bytes depend on
-  delete-sync state (violating G4/payload synchrony), and its RO-first
-  comparator lets reverse-RO override the era principle (UWZX `xzwe`) with
-  a sync-dependent flip.
+## What is and is not claimed
+
+### The unresolved intent ambiguity
+
+The primitive sequence `delete(B); insert(Y)` does not say whether the user is
+performing a logical replacement in B's old slot or a separate later insertion
+into the new visible gap. Those meanings demand different immutable FugueMax
+coordinates. Outbox timing cannot safely select between them, and waiting for
+a later reference to B would make existing text move or make delivery order
+matter.
+
+A transport-independent design therefore needs an explicit edit-level
+distinction. The clearest current direction is a `splice`/`replace` operation
+that captures the pre-edit gap and emits the replacement run there before
+tombstoning its targets. Ordinary primitive insertion after a deletion would
+always use the projected live gap. N7 would then compare two internal schedules
+of the same declared splice, rather than infer replacement intent from adjacent
+raw calls. This design has not yet been implemented or proved here.
+
+### The in-flight-reference boundary
+
+Suppose `G` was already handed to sync and another replica authored continuation
+`X` while `G` was live. If `X` is still in flight when a different replica
+receives `delete(G)` and types `Y`, the dead `G` must remain in the replicated
+tree so late `X` still has a valid origin. It is only transparent to the local
+projection that chooses Y's new origins.
+
+C3 therefore requires reference safety: every delivery order converges,
+deleting `G` removes only `G`, and receiving late `X` adds only `X` without
+moving established survivors. When delete(G) was handed to sync before Y was
+typed and Y did not know X, the remaining immutable FugueMax structure decides
+their relative order; both `YX` and `XY` can be valid under different ID
+assignments. No universal Y-before-X rule is part of C3 or this algorithm.
+
+The implementation gives semantic neutrality, not immediate physical garbage
+collection. Insert and delete operations still exist in the causal operation
+log because another replica may already reference them—or may have authored a
+reference while the insert was live that is still in flight. Such a reference
+remains valid because the replicated tree is never rewritten and projection
+walks through skipped tombstones to their live descendants. Safe tombstone/log
+GC requires protocol-level stability or acknowledgements and is a separate
+task.
+
+The explicit publication frontier is part of this experiment's integration contract.
+Without an outbox boundary, "unsynced" has no well-defined meaning and the N7
+command-order law cannot be scoped correctly. `saveLocalPublicationState()` and
+`loadLocalPublicationState()` persist that device-local watermark and its
+not-yet-handed-off node IDs beside the transport's durable outbox. This state is
+deliberately absent from replicated snapshots, so restoring a mid-outbox
+checkpoint requires both pieces; alternatively the application can flush
+before saving. The local blob contains a fingerprint of the exact Fugue tree
+and rejects a mismatched shared snapshot, catching both ordinary torn-write
+directions. Publication-only changes leave the tree unchanged, so the shared
+snapshot, local blob, and durable outbox must still be committed atomically as
+one local checkpoint. Restoration must use a fresh replica ID: like the original
+`fugue-max-simple`, the per-replica insertion counter is intentionally not in
+the replicated snapshot, so reusing the old ID would create duplicate node
+IDs. The local checkpoint records the old ID and rejects that unsafe restore.
+
+The present evidence is neither a completion claim nor a machine-checked proof.
+The experiment passes the remote, staged-published, and local-outbox ghost
+transformations, reverse-RO buckets, stepwise stability, forward
+non-interleaving, convergence, and the currently generated late-`LO` reference
+cases. It fails deletion/insertion commutation when a transport handoff occurs
+between those edits. The fuzzer also does not yet cover all `RO=G`, left-child,
+tombstone-chain, restart, and causal-delivery geometries. The
+experimental backward checker is not a validity oracle: it reports published
+FugueMax itself on traces where its premise reconstruction is incomplete, so it
+remains outside the required profile.
+
+## Independent audit outcome
+
+Four independent reviews of the algorithm, semantic contract, fuzzer, and
+alternative design reached the same conclusion:
+
+- N1-N5 are real published-FugueMax failures; N7 and C3 are not the only
+  important cases. N7/C3 constrain repairs, while S1/S2/C1/C2 protect deletion
+  stability, reverse-RO clumping, and non-interleaving.
+- the generalized fuzzer is useful metamorphic testing over arbitrary settled
+  prefixes, but its N7 and C3 extensions are still bounded templates rather
+  than an exhaustive state-space proof;
+- the handoff-dependent N7 failure is reproducible both minimally and in 261
+  of 300 deterministic generalized trials with the current seed; and
+- a credible next design should remove transport state from origins and expose
+  replacement as explicit splice/edit intent, then broaden C3 generation to
+  `LO=G`, `RO=G`, left-child, chain, restart, and all causal-delivery cases.
+
+Accordingly, this repository is an audited research checkpoint with a strong
+test harness and a falsified candidate—not yet a corrected Fugue algorithm that
+should be presented as complete.

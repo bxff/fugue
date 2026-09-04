@@ -1,4 +1,4 @@
-// Generate the single-page replayable counterexample review directly from
+// Generate the single-page counterexample review directly from
 // test_tombstone_invariance.js.
 //
 // Usage:
@@ -39,7 +39,7 @@ const requested = valuesFor("--implementation");
 const implementations = requested.length > 0
   ? requested.map(parseImplementation)
   : [
-      { label: "Current Fugue-Era", module: "fugue-max-simple" },
+      { label: "Projected-gap experiment", module: "fugue-max-simple" },
       { label: "Published FugueMax", module: "fugue-max-canonical", optional: true },
     ];
 const outputDir = resolve(here, valueFor("--out", "generated/tombstone-tests"));
@@ -491,7 +491,7 @@ function renderAnimatedCase(test, animationVersion) {
       <section class="world">
         <h2>${escapeXml(world.title)}</h2>
         ${world.annotation ? `<p class="annotation">${escapeXml(world.annotation)}</p>` : '<p class="annotation">&nbsp;</p>'}
-        <canvas data-world="${index}" aria-label="Animated causal graph for ${escapeXml(world.title)}"></canvas>
+        <canvas data-world="${index}" aria-label="Causal graph for ${escapeXml(world.title)}"></canvas>
       </section>`).join("");
   return `<!doctype html>
 <html lang="en">
@@ -513,12 +513,11 @@ function renderAnimatedCase(test, animationVersion) {
     .world { min-width: 0; text-align: center; }
     h2 { margin: 0; font-size: 17px; font-weight: 650; }
     .annotation { min-height: 22px; margin: 4px 8px 8px; color: #888; font-size: 12px; line-height: 1.35; }
-    canvas { display: block; width: 100%; aspect-ratio: 1; background: #222; cursor: pointer; }
+    canvas { display: block; width: 100%; aspect-ratio: 1; background: #222; }
     footer { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 18px; padding-top: 15px; border-top: 1px solid #d9d9d6; }
     footer p { margin: 0; font-size: 14px; line-height: 1.5; }
     footer span { display: block; margin-bottom: 4px; color: #777; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
     .required { font-weight: 650; }
-    .hint { grid-column: 1 / -1; color: #999; font-size: 12px; }
     html.embedded .page { padding: 14px; }
     html.embedded header { display: none; }
     html.embedded .worlds { padding-top: 0; }
@@ -541,7 +540,6 @@ function renderAnimatedCase(test, animationVersion) {
     <footer>
       <p class="catches"><span>What this catches</span>${escapeXml(test.catches)}</p>
       <p class="required"><span>Required behavior</span>${escapeXml(test.visual.required)}</p>
-      <p class="hint">Click a graph to replay the ancestry and merge.</p>
     </footer>
   </div>
   <script>window.GRAPH_CASE = ${data};</script>
@@ -569,19 +567,6 @@ function renderAnimationScript() {
 
   function setup(canvas, world, worldIndex) {
     const ctx = canvas.getContext('2d');
-    let started = performance.now();
-    let visible = true;
-    let frame = null;
-
-    const restart = () => { started = performance.now(); schedule(); };
-    canvas.addEventListener('click', restart);
-
-    const observer = new IntersectionObserver(entries => {
-      visible = entries[0].isIntersecting;
-      if (visible) schedule();
-      else if (frame !== null) { cancelAnimationFrame(frame); frame = null; }
-    }, { rootMargin: '100px' });
-    observer.observe(canvas);
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -595,8 +580,7 @@ function renderAnimationScript() {
     }
 
     function schedule() {
-      if (!visible || frame !== null) return;
-      frame = requestAnimationFrame(now => { frame = null; draw(now); schedule(); });
+      requestAnimationFrame(draw);
     }
 
     function line(x1, y1, x2, y2, color, width, progress = 1, reverse = false) {
@@ -673,13 +657,8 @@ function renderAnimationScript() {
         y: branchY, branch, index,
       }));
 
-      const perBranch = 900, begin = 650, spread = 620;
-      const mergeStart = begin + branchCount * perBranch + 350;
-      const mergeDuration = 650, hold = 1900;
-      const cycle = mergeStart + mergeDuration + hold;
-      const t = (now - started) % cycle;
-      const progress = branchPoints.map((_, index) => clamp((t - begin - index * perBranch) / spread));
-      const mergeProgress = clamp((t - mergeStart) / mergeDuration);
+      const progress = branchPoints.map(() => 1);
+      const mergeProgress = 1;
 
       // Muted history first, exactly like the meeting-118 animator.
       branchPoints.forEach(point => {
@@ -744,11 +723,120 @@ function renderAnimationScript() {
     }
 
     schedule();
+    window.addEventListener('resize', schedule);
     return () => {
-      visible = false;
-      observer.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
+      window.removeEventListener('resize', schedule);
+    };
+  }
+
+  function setupC3Proof(canvas, graph) {
+    const ctx = canvas.getContext('2d');
+    const nodes = new Map(graph.nodes.map(node => [node.id, node]));
+    const color = name => COLORS[name] || COLORS.grey;
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(520, Math.floor(canvas.getBoundingClientRect().width));
+      const height = Math.round(width * .79);
+      canvas.style.height = height + 'px';
+      if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+      }
+    }
+
+    function schedule() {
+      requestAnimationFrame(draw);
+    }
+
+    function centerText(value, x, y, size, fill, weight = 650) {
+      ctx.font = weight + ' ' + size + 'px Avenir Next, Avenir, Inter, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = fill; ctx.fillText(value, x, y);
+    }
+
+    function wrappedText(value, x, y, maxWidth, size, fill, lineHeight) {
+      ctx.font = '650 ' + size + 'px Avenir Next, Avenir, Inter, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = fill;
+      const words = value.split(/\s+/); const lines = []; let current = '';
+      words.forEach(word => {
+        const next = current ? current + ' ' + word : word;
+        if (current && ctx.measureText(next).width > maxWidth) { lines.push(current); current = word; }
+        else current = next;
+      });
+      if (current) lines.push(current);
+      lines.slice(0, 2).forEach((line, index) => ctx.fillText(line, x, y + index * lineHeight));
+    }
+
+    function tokenString(tokens, x, y, size, fill) {
+      const gap = size * .76; const start = x - (tokens.length - 1) * gap / 2;
+      tokens.forEach((token, index) => {
+        const dead = token.endsWith('†'); const tx = start + index * gap;
+        centerText(bare(token), tx, y, size, dead ? '#929297' : fill, 750);
+        if (dead) {
+          ctx.beginPath(); ctx.moveTo(tx - gap * .36, y); ctx.lineTo(tx + gap * .36, y);
+          ctx.strokeStyle = '#9b9ba0'; ctx.lineWidth = .0024; ctx.stroke();
+          centerText('†', tx + gap * .42, y - size * .38, size * .42, '#9b9ba0', 650);
+        }
+      });
+    }
+
+    function edgeLine(edge, progress, muted = false) {
+      const from = nodes.get(edge.from); const to = nodes.get(edge.to);
+      const ex = from.x + (to.x - from.x) * progress;
+      const ey = from.y + (to.y - from.y) * progress;
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(ex, ey);
+      ctx.strokeStyle = muted ? COLORS.edge : color(edge.color);
+      ctx.lineWidth = muted ? .0028 : .0048; ctx.lineCap = 'round';
+      ctx.setLineDash(edge.dashed && !muted ? [.012, .009] : []); ctx.stroke(); ctx.setLineDash([]);
+      if (!muted && edge.label && progress >= .98) {
+        const mx = from.x + (to.x - from.x) * .52;
+        const my = from.y + (to.y - from.y) * .52;
+        const offset = edge.color === 'red' ? -.022 : edge.color === 'blue' ? .022 : .028;
+        centerText(edge.label, mx + offset, my, .0125, color(edge.color), 750);
+      }
+    }
+
+    function stageProgress(stage, elapsed) {
+      return 1;
+    }
+
+    function draw(now) {
+      resize();
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#222'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(canvas.width, 0, 0, canvas.height, 0, 0);
+
+      const elapsed = Infinity;
+      graph.edges.forEach(edge => edgeLine(edge, 1, true));
+      graph.edges.forEach(edge => edgeLine(edge, stageProgress(edge.stage, elapsed), false));
+
+      graph.nodes.forEach(node => {
+        const progress = stageProgress(node.stage, elapsed);
+        const active = progress > 0;
+        const pop = progress > 0 && progress < 1 ? 1 + (1 - progress) * .28 * Math.sin(Math.sqrt(progress) * tau) : 1;
+        ctx.beginPath(); ctx.arc(node.x, node.y, .018 * pop, 0, tau);
+        ctx.fillStyle = active ? color(node.color) : COLORS.grey; ctx.fill();
+        if (node.id === 'FINAL') {
+          centerText('FINAL MERGE', node.x, node.y - .041, .013, COLORS.dim, 800);
+          if (active) {
+            tokenString(node.state, node.x, node.y + .043, .026, COLORS.text);
+            centerText('VALID LINEAR ORDER', node.x, node.y + .082, .013, COLORS.pass, 800);
+          }
+          return;
+        }
+        tokenString(node.state, node.x, node.y + .036, .024, COLORS.text);
+        wrappedText(node.note, node.x, node.y + .058, .22, .0115, COLORS.dim, .015);
+      });
+
+      if (stageProgress(5, elapsed) > .98) {
+        centerText('The two partial states agree: preserve Z<W and W<Y, giving AZWY.', .5, .985, .012, COLORS.dim, 650);
+      }
+    }
+
+    schedule();
+    window.addEventListener('resize', schedule);
+    return () => {
+      window.removeEventListener('resize', schedule);
     };
   }
 
@@ -762,9 +850,84 @@ function renderAnimationScript() {
       activeCleanups.push(setup(canvas, graphCase.worlds[index], index));
     });
   };
+  let proofCleanups = [];
+  window.renderProofGraphs = (root, graphCase) => {
+    proofCleanups.forEach(cleanup => cleanup());
+    proofCleanups = [];
+    if (!root || !graphCase) return;
+    root.querySelectorAll('canvas[data-c3-proof]').forEach(canvas => {
+      proofCleanups.push(setupC3Proof(canvas, graphCase));
+    });
+  };
   if (window.GRAPH_CASE) window.renderGraphCase(document, window.GRAPH_CASE);
 })();
 `;
+}
+
+function c3HandoffGraphData() {
+  return {
+    nodes: [
+      { id: "A", x: 0.50, y: 0.07, state: ["A"], note: "shared start", stage: 0, color: "shared" },
+      { id: "B", x: 0.28, y: 0.19, state: ["A", "B"], note: "insert B", stage: 1, color: "red" },
+      { id: "W", x: 0.75, y: 0.19, state: ["A", "W"], note: "insert W · never saw B", stage: 1, color: "blue" },
+      { id: "Z", x: 0.17, y: 0.34, state: ["A", "B", "Z"], note: "Z after live B · LO(Z)=B", stage: 2, color: "red" },
+      { id: "D", x: 0.40, y: 0.34, state: ["A", "B†"], note: "hand delete(B) to sync", stage: 2, color: "green" },
+      { id: "ZW", x: 0.25, y: 0.50, state: ["A", "B", "Z", "W"], note: "merge Z + W", stage: 3, color: "shared" },
+      { id: "Y", x: 0.55, y: 0.49, state: ["A", "Y", "B†"], note: "type Y · LO=A, RO=end", stage: 3, color: "green" },
+      { id: "AZW", x: 0.25, y: 0.69, state: ["A", "Z", "W"], note: "delete removes only B · therefore Z<W", stage: 4, color: "white" },
+      { id: "AWY", x: 0.71, y: 0.69, state: ["A", "W", "Y"], note: "ghost-neutral merge · therefore W<Y", stage: 4, color: "white" },
+      { id: "FINAL", x: 0.48, y: 0.86, state: ["A", "Z", "W", "Y"], note: "valid final merge · Z<W and W<Y", stage: 5, color: "white" },
+    ],
+    edges: [
+      { from: "A", to: "B", color: "red", stage: 1 },
+      { from: "A", to: "W", color: "blue", stage: 1 },
+      { from: "B", to: "Z", color: "red", stage: 2 },
+      { from: "B", to: "D", color: "green", stage: 2 },
+      { from: "Z", to: "ZW", color: "red", stage: 3 },
+      { from: "W", to: "ZW", color: "blue", stage: 3 },
+      { from: "D", to: "Y", color: "green", stage: 3 },
+      { from: "ZW", to: "AZW", color: "red", stage: 4 },
+      { from: "D", to: "AZW", color: "green", stage: 4 },
+      { from: "W", to: "AWY", color: "blue", stage: 4 },
+      { from: "Y", to: "AWY", color: "green", stage: 4 },
+      { from: "AZW", to: "FINAL", color: "red", stage: 5, label: "preserve Z<W" },
+      { from: "AWY", to: "FINAL", color: "blue", stage: 5, label: "preserve W<Y" },
+    ],
+  };
+}
+
+function renderC3HandoffGraph() {
+  const graphCase = c3HandoffGraphData();
+  const data = JSON.stringify(graphCase).replaceAll("</", "<\\/");
+  return `
+    <section class="c3-proof c3-graph-proof" id="c3-proof" hidden>
+      <header class="proof-head">
+        <p>WHY THE POST-HANDOFF RESULT IS VALID</p>
+        <h2>One history and two compatible partial merges produce AZWY.</h2>
+        <span>Follow the connected paths downward. No additional Y-before-Z rule is assumed.</span>
+        <div class="proof-cast" aria-label="Characters used in the example">
+          <i><b>B</b> deleted origin</i><i><b>Z</b> continuation of live B</i><i><b>W</b> concurrent ordering witness</i><i><b>Y</b> later insert after deletion</i>
+        </div>
+        <div class="publication-key"><b>“Still in the local outbox”</b> means delete(B) was generated on this device but has not yet been handed to the sync layer. <b>“Handed to sync”</b> is the explicit local handoff point—not a delivery acknowledgement from every peer.</div>
+      </header>
+      <div class="unified-proof-graph">
+        <h3>How the same operations reach the final merge</h3>
+        <p>Every operation, deletion, and merge is shown in its final state.</p>
+        <canvas data-c3-proof aria-label="Connected graph showing the valid C3 post-handoff merge"></canvas>
+      </div>
+      <div class="proof-equation" aria-label="Z before W and W before Y imply AZWY">
+        <span><b>Z &lt; W</b><small>deletion stability</small></span>
+        <i>+</i>
+        <span><b>W &lt; Y</b><small>ghost neutrality</small></span>
+        <i>=</i>
+        <strong>A Z W Y</strong>
+      </div>
+      <div class="proof-conclusion">
+        <b>What C3 requires</b>
+        <span>C3 only requires B† to keep late Z reachable without moving existing survivors. In the current experiment, Y stays in B's gap before handoff but uses LO=A, RO=end after handoff, so AYZ or AZY may result. N7 separately shows why making that distinction depend on handoff is not an acceptable final design.</span>
+      </div>
+      <script>window.C3_PROOF_CASE = ${data};</script>
+    </section>`;
 }
 
 function renderIndex(animationVersion) {
@@ -773,7 +936,7 @@ function renderIndex(animationVersion) {
     [["N1", "N2", "N3", "N4", "N5"], "Ghost-history neutrality"],
     [["N7"], "Naive-fix regression"],
     [["S1", "S2"], "Deletion stability"],
-    [["C1", "C2", "C3", "C4"], "Structural controls"],
+    [["C1", "C2", "C3"], "Structural controls"],
   ];
   const semanticNavigation = semanticGroups.map(([ids, label]) => {
     const items = ids.map((id) => reviewCases.find((test) => test.id === id)).filter(Boolean).map((test) => {
@@ -856,11 +1019,90 @@ function renderIndex(animationVersion) {
     .worlds[data-count="1"] .world { width: min(760px, 100%); margin: 0 auto; }
     .world h3 { margin: 0; font-size: 17px; font-weight: 650; }
     .annotation { min-height: 22px; margin: 4px 8px 8px; color: #888; font-size: 12px; line-height: 1.35; }
-    canvas { display: block; width: 100%; aspect-ratio: 1; background: #222; cursor: pointer; }
+    canvas { display: block; width: 100%; aspect-ratio: 1; background: #222; }
     .case-notes { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 14px; padding-top: 12px; border-top: 1px solid #d9d9d6; }
     .case-notes p { margin: 0; font-size: 14px; line-height: 1.45; }
     .case-notes span { display: block; margin-bottom: 3px; color: #777; font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
     #case-required { font-weight: 650; }
+    .c3-proof { margin-top: 18px; border: 1px solid #d8d8d5; background: #fafaf8; }
+    .proof-head { padding: 22px 24px 18px; border-bottom: 1px solid #d8d8d5; }
+    .proof-head p { margin: 0 0 5px; color: #c53b32; font-size: 11px; font-weight: 750; letter-spacing: .09em; }
+    .proof-head h2 { margin: 0; max-width: 980px; font-size: 24px; line-height: 1.18; letter-spacing: -.015em; }
+    .proof-head span { display: block; margin-top: 8px; color: #666; font-size: 14px; }
+    .proof-cast { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 15px; }
+    .proof-cast i { padding: 5px 9px; border: 1px solid #d8d8d5; border-radius: 999px; background: white; color: #666; font-size: 10px; font-style: normal; }
+    .proof-cast b { color: #222; font-size: 11px; }
+    .publication-key { max-width: 940px; margin-top: 13px; padding: 9px 11px; border-left: 3px solid #3794ff; background: #f0f5fa; color: #555; font-size: 11px; line-height: 1.45; }
+    .publication-key b { color: #2c6092; }
+    .proof-sequence { display: flex; justify-content: center; align-items: center; gap: 5px; }
+    .proof-sequence i { color: #777; font-size: 12px; font-style: normal; }
+    .proof-token { position: relative; display: inline-grid; min-width: 29px; height: 31px; padding: 0 7px; place-items: center; border-bottom: 2px solid currentColor; color: inherit; font-size: 18px; font-weight: 700; }
+    .proof-token.dead { color: #999; text-decoration: line-through; }
+    .proof-token sup { position: absolute; top: -3px; right: -2px; font-size: 9px; text-decoration: none; }
+    .proof-story { padding: 0 24px; }
+    .story-step { display: grid; grid-template-columns: 42px minmax(220px, .7fr) minmax(360px, 1.3fr); gap: 18px; align-items: center; min-height: 170px; padding: 22px 0; border-bottom: 1px solid #dededb; }
+    .story-step:last-child { border-bottom: 0; }
+    .step-number { display: grid; width: 34px; height: 34px; place-items: center; align-self: start; border: 2px solid #333; border-radius: 50%; background: white; font-size: 15px; font-weight: 750; }
+    .step-copy h3 { margin: 0 0 7px; font-size: 18px; line-height: 1.2; }
+    .step-copy p { margin: 0; color: #5f5f5b; font-size: 13px; line-height: 1.5; }
+    .step-visual { min-width: 0; padding: 22px; border-radius: 3px; background: #222; color: #eee; }
+    .history-visual { padding-bottom: 14px; }
+    .continuation-note { width: 114px; margin: 10px auto 0; border-top: 2px solid #3794ff; color: #78b9f2; text-align: center; }
+    .continuation-note span { position: relative; top: 5px; font-size: 10px; font-weight: 650; }
+    .deletion-visual { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px; align-items: center; }
+    .deletion-visual > div { display: flex; gap: 13px; align-items: center; justify-content: center; }
+    .change-arrow { color: #aaa; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+    .law { display: inline-block; padding: 8px 11px; border-left: 3px solid; font-size: 13px; white-space: nowrap; }
+    .law.blue { border-color: #3794ff; color: #78b9f2; }
+    .law.green { border-color: #2ba66a; color: #69cf9c; }
+    .twin-worlds { display: grid; grid-template-columns: 1fr 112px 1fr; gap: 10px; align-items: stretch; padding: 12px; background: #e9e9e6; color: #333; }
+    .twin-worlds > section { padding: 12px; background: white; }
+    .twin-worlds small { display: block; margin-bottom: 8px; color: #777; font-size: 9px; font-weight: 750; letter-spacing: .06em; }
+    .author-screen { padding: 9px; background: #222; color: white; text-align: center; }
+    .author-screen > span { display: block; margin-bottom: 8px; color: #999; font-size: 9px; text-transform: uppercase; }
+    .in-flight { display: flex; min-height: 34px; margin-top: 7px; padding: 6px 8px; gap: 6px; align-items: center; border: 1px dashed #bbb; }
+    .in-flight b { margin-right: auto; color: #888; font-size: 9px; font-weight: 650; text-transform: uppercase; }
+    .flight-token { display: grid; width: 25px; height: 25px; place-items: center; border-radius: 50%; background: #777; color: white; font-size: 11px; font-weight: 750; }
+    .flight-token.red { background: #e15759; }
+    .same-input { display: flex; flex-direction: column; justify-content: center; color: #555; text-align: center; }
+    .same-input::before, .same-input::after { content: ''; height: 1px; background: #aaa; }
+    .same-input b { margin-top: 7px; font-size: 10px; text-transform: uppercase; }
+    .same-input span { margin: 3px 0 7px; font-size: 10px; line-height: 1.25; }
+    .settled-visual { display: flex; gap: 24px; align-items: center; justify-content: center; }
+    .final-step { min-height: 295px; }
+    .placement-visual { padding: 24px 28px 20px; }
+    .demand-label { display: flex; width: 235px; flex-direction: column; line-height: 1.25; }
+    .demand-label b { font-size: 10px; letter-spacing: .045em; text-transform: uppercase; }
+    .demand-label span { margin-top: 2px; font-size: 12px; }
+    .before-label { margin: 0 auto 8px 92px; color: #78b9f2; text-align: center; }
+    .after-label { margin: 8px 0 0 auto; color: #ff8789; text-align: center; }
+    .placement-line { display: grid; grid-template-columns: 64px 110px 64px 60px 64px 110px; justify-content: center; align-items: center; }
+    .line-token { display: grid; width: 52px; height: 52px; place-items: center; border-bottom: 3px solid #eee; color: white; font-size: 26px; font-weight: 750; }
+    .demand-gap { display: grid; height: 62px; place-items: center; border: 2px dashed; border-radius: 4px; }
+    .demand-gap i { font-size: 20px; font-style: normal; font-weight: 750; }
+    .demand-gap.before { border-color: #3794ff; background: #3794ff1c; color: #78b9f2; }
+    .demand-gap.after { border-color: #e15759; background: #e157591c; color: #ff8789; }
+    .plain-gap { height: 1px; background: #666; }
+    .no-place { margin-top: 18px; padding-top: 15px; border-top: 1px solid #555; text-align: center; }
+    .no-place strong { display: block; color: white; font-size: 17px; }
+    .no-place span { display: block; margin-top: 4px; color: #aaa; font-size: 11px; }
+    .proof-conclusion { display: grid; grid-template-columns: 180px minmax(0, 1fr); gap: 18px; margin: 0; padding: 18px 24px; border-top: 1px solid #d8d8d5; background: #edf7f1; font-size: 13px; line-height: 1.5; }
+    .proof-conclusion b { color: #16844b; }
+    .proof-graph-worlds { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 18px; padding: 22px 24px 26px; }
+    .proof-graph-world { min-width: 0; text-align: center; }
+    .proof-graph-world h3 { margin: 0; font-size: 17px; font-weight: 650; line-height: 1.25; }
+    .proof-graph-world > p { min-height: 37px; margin: 5px 8px 9px; color: #777; font-size: 11px; line-height: 1.4; }
+    .proof-graph-world canvas { width: 100%; aspect-ratio: 1; background: #222; }
+    .unified-proof-graph { padding: 22px 24px 26px; text-align: center; }
+    .unified-proof-graph h3 { margin: 0; font-size: 18px; font-weight: 650; }
+    .unified-proof-graph > p { margin: 5px 0 12px; color: #777; font-size: 11px; }
+    .unified-proof-graph canvas { display: block; width: 100%; background: #222; }
+    .proof-equation { display: flex; gap: 14px; align-items: center; justify-content: center; padding: 20px 24px; border-top: 1px solid #d8d8d5; background: #222; color: white; }
+    .proof-equation > span { display: flex; min-width: 115px; flex-direction: column; text-align: center; }
+    .proof-equation > span b { color: #69cf9c; font-size: 20px; }
+    .proof-equation small { margin-top: 4px; color: #aaa; font-size: 9px; }
+    .proof-equation > i { color: #777; font-size: 18px; font-style: normal; }
+    .proof-equation > strong { padding: 10px 12px; border: 1px solid #35a56f; color: #69cf9c; font-size: 18px; }
     @media (max-width: 900px) {
       .masthead { grid-template-columns: 1fr; padding: 22px 18px 18px; }
       .masthead > * { min-width: 0; }
@@ -871,6 +1113,13 @@ function renderIndex(animationVersion) {
       .nav-group a { grid-template-columns: 28px 1fr; }
       .nav-group span { display: none; }
       .worlds, .case-notes { grid-template-columns: 1fr; }
+      .story-step { grid-template-columns: 38px minmax(0, 1fr); }
+      .step-visual { grid-column: 1 / -1; }
+      .twin-worlds { grid-template-columns: 1fr; }
+      .same-input::before, .same-input::after { width: 100%; }
+      .proof-graph-worlds { grid-template-columns: 1fr; }
+      .proof-equation { flex-wrap: wrap; }
+      .proof-conclusion { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -899,6 +1148,7 @@ function renderIndex(animationVersion) {
             <p><span>Expected result</span><b id="case-required"></b></p>
           </div>
         </div>
+${renderC3HandoffGraph()}
       </section>
     </div>
   </main>
@@ -924,10 +1174,13 @@ function renderIndex(animationVersion) {
       worlds.innerHTML = entry.worlds.map((world, index) =>
         '<section class="world"><h3>' + html(world.title) + '</h3>' +
         '<p class="annotation">' + (world.annotation ? html(world.annotation) : '&nbsp;') + '</p>' +
-        '<canvas data-world="' + index + '" aria-label="Animated causal graph for ' + html(world.title) + '"></canvas></section>'
+        '<canvas data-world="' + index + '" aria-label="Causal graph for ' + html(world.title) + '"></canvas></section>'
       ).join('');
       window.GRAPH_CASE = entry;
       window.renderGraphCase(figure, entry);
+      const proof = document.querySelector('#c3-proof');
+      proof.hidden = id !== 'C3';
+      window.renderProofGraphs(proof, id === 'C3' ? window.C3_PROOF_CASE : null);
       document.querySelectorAll('[data-case]').forEach(link => link.setAttribute('aria-current', link.dataset.case === id ? 'true' : 'false'));
       if (updateHistory) history.replaceState(null, '', '#' + id);
     };

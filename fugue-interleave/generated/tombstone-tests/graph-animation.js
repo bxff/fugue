@@ -12,19 +12,6 @@
 
   function setup(canvas, world, worldIndex) {
     const ctx = canvas.getContext('2d');
-    let started = performance.now();
-    let visible = true;
-    let frame = null;
-
-    const restart = () => { started = performance.now(); schedule(); };
-    canvas.addEventListener('click', restart);
-
-    const observer = new IntersectionObserver(entries => {
-      visible = entries[0].isIntersecting;
-      if (visible) schedule();
-      else if (frame !== null) { cancelAnimationFrame(frame); frame = null; }
-    }, { rootMargin: '100px' });
-    observer.observe(canvas);
 
     function resize() {
       const dpr = window.devicePixelRatio || 1;
@@ -38,8 +25,7 @@
     }
 
     function schedule() {
-      if (!visible || frame !== null) return;
-      frame = requestAnimationFrame(now => { frame = null; draw(now); schedule(); });
+      requestAnimationFrame(draw);
     }
 
     function line(x1, y1, x2, y2, color, width, progress = 1, reverse = false) {
@@ -116,13 +102,8 @@
         y: branchY, branch, index,
       }));
 
-      const perBranch = 900, begin = 650, spread = 620;
-      const mergeStart = begin + branchCount * perBranch + 350;
-      const mergeDuration = 650, hold = 1900;
-      const cycle = mergeStart + mergeDuration + hold;
-      const t = (now - started) % cycle;
-      const progress = branchPoints.map((_, index) => clamp((t - begin - index * perBranch) / spread));
-      const mergeProgress = clamp((t - mergeStart) / mergeDuration);
+      const progress = branchPoints.map(() => 1);
+      const mergeProgress = 1;
 
       // Muted history first, exactly like the meeting-118 animator.
       branchPoints.forEach(point => {
@@ -187,11 +168,120 @@
     }
 
     schedule();
+    window.addEventListener('resize', schedule);
     return () => {
-      visible = false;
-      observer.disconnect();
-      if (frame !== null) cancelAnimationFrame(frame);
-      frame = null;
+      window.removeEventListener('resize', schedule);
+    };
+  }
+
+  function setupC3Proof(canvas, graph) {
+    const ctx = canvas.getContext('2d');
+    const nodes = new Map(graph.nodes.map(node => [node.id, node]));
+    const color = name => COLORS[name] || COLORS.grey;
+
+    function resize() {
+      const dpr = window.devicePixelRatio || 1;
+      const width = Math.max(520, Math.floor(canvas.getBoundingClientRect().width));
+      const height = Math.round(width * .79);
+      canvas.style.height = height + 'px';
+      if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+      }
+    }
+
+    function schedule() {
+      requestAnimationFrame(draw);
+    }
+
+    function centerText(value, x, y, size, fill, weight = 650) {
+      ctx.font = weight + ' ' + size + 'px Avenir Next, Avenir, Inter, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillStyle = fill; ctx.fillText(value, x, y);
+    }
+
+    function wrappedText(value, x, y, maxWidth, size, fill, lineHeight) {
+      ctx.font = '650 ' + size + 'px Avenir Next, Avenir, Inter, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillStyle = fill;
+      const words = value.split(/s+/); const lines = []; let current = '';
+      words.forEach(word => {
+        const next = current ? current + ' ' + word : word;
+        if (current && ctx.measureText(next).width > maxWidth) { lines.push(current); current = word; }
+        else current = next;
+      });
+      if (current) lines.push(current);
+      lines.slice(0, 2).forEach((line, index) => ctx.fillText(line, x, y + index * lineHeight));
+    }
+
+    function tokenString(tokens, x, y, size, fill) {
+      const gap = size * .76; const start = x - (tokens.length - 1) * gap / 2;
+      tokens.forEach((token, index) => {
+        const dead = token.endsWith('†'); const tx = start + index * gap;
+        centerText(bare(token), tx, y, size, dead ? '#929297' : fill, 750);
+        if (dead) {
+          ctx.beginPath(); ctx.moveTo(tx - gap * .36, y); ctx.lineTo(tx + gap * .36, y);
+          ctx.strokeStyle = '#9b9ba0'; ctx.lineWidth = .0024; ctx.stroke();
+          centerText('†', tx + gap * .42, y - size * .38, size * .42, '#9b9ba0', 650);
+        }
+      });
+    }
+
+    function edgeLine(edge, progress, muted = false) {
+      const from = nodes.get(edge.from); const to = nodes.get(edge.to);
+      const ex = from.x + (to.x - from.x) * progress;
+      const ey = from.y + (to.y - from.y) * progress;
+      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(ex, ey);
+      ctx.strokeStyle = muted ? COLORS.edge : color(edge.color);
+      ctx.lineWidth = muted ? .0028 : .0048; ctx.lineCap = 'round';
+      ctx.setLineDash(edge.dashed && !muted ? [.012, .009] : []); ctx.stroke(); ctx.setLineDash([]);
+      if (!muted && edge.label && progress >= .98) {
+        const mx = from.x + (to.x - from.x) * .52;
+        const my = from.y + (to.y - from.y) * .52;
+        const offset = edge.color === 'red' ? -.022 : edge.color === 'blue' ? .022 : .028;
+        centerText(edge.label, mx + offset, my, .0125, color(edge.color), 750);
+      }
+    }
+
+    function stageProgress(stage, elapsed) {
+      return 1;
+    }
+
+    function draw(now) {
+      resize();
+      ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#222'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.setTransform(canvas.width, 0, 0, canvas.height, 0, 0);
+
+      const elapsed = Infinity;
+      graph.edges.forEach(edge => edgeLine(edge, 1, true));
+      graph.edges.forEach(edge => edgeLine(edge, stageProgress(edge.stage, elapsed), false));
+
+      graph.nodes.forEach(node => {
+        const progress = stageProgress(node.stage, elapsed);
+        const active = progress > 0;
+        const pop = progress > 0 && progress < 1 ? 1 + (1 - progress) * .28 * Math.sin(Math.sqrt(progress) * tau) : 1;
+        ctx.beginPath(); ctx.arc(node.x, node.y, .018 * pop, 0, tau);
+        ctx.fillStyle = active ? color(node.color) : COLORS.grey; ctx.fill();
+        if (node.id === 'FINAL') {
+          centerText('FINAL MERGE', node.x, node.y - .041, .013, COLORS.dim, 800);
+          if (active) {
+            tokenString(node.state, node.x, node.y + .043, .026, COLORS.text);
+            centerText('VALID LINEAR ORDER', node.x, node.y + .082, .013, COLORS.pass, 800);
+          }
+          return;
+        }
+        tokenString(node.state, node.x, node.y + .036, .024, COLORS.text);
+        wrappedText(node.note, node.x, node.y + .058, .22, .0115, COLORS.dim, .015);
+      });
+
+      if (stageProgress(5, elapsed) > .98) {
+        centerText('The two partial states agree: preserve Z<W and W<Y, giving AZWY.', .5, .985, .012, COLORS.dim, 650);
+      }
+    }
+
+    schedule();
+    window.addEventListener('resize', schedule);
+    return () => {
+      window.removeEventListener('resize', schedule);
     };
   }
 
@@ -203,6 +293,15 @@
     root.querySelectorAll('canvas[data-world]').forEach(canvas => {
       const index = Number(canvas.dataset.world);
       activeCleanups.push(setup(canvas, graphCase.worlds[index], index));
+    });
+  };
+  let proofCleanups = [];
+  window.renderProofGraphs = (root, graphCase) => {
+    proofCleanups.forEach(cleanup => cleanup());
+    proofCleanups = [];
+    if (!root || !graphCase) return;
+    root.querySelectorAll('canvas[data-c3-proof]').forEach(canvas => {
+      proofCleanups.push(setupC3Proof(canvas, graphCase));
     });
   };
   if (window.GRAPH_CASE) window.renderGraphCase(document, window.GRAPH_CASE);

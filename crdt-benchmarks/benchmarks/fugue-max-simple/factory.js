@@ -39,7 +39,11 @@ export class FugueMaxSimpleCRDT {
     });
     if (updateHandler) {
       this.doc.on("Send", (e) => {
+        const arrayFrontier = this.carray?.captureLocalPublicationFrontier();
+        const textFrontier = this.ctext?.captureLocalPublicationFrontier();
         updateHandler(this._encodeUpdate(e.message, false));
+        this.carray?.markLocalUpdatesSent(arrayFrontier);
+        this.ctext?.markLocalUpdatesSent(textFrontier);
       });
     }
     /**

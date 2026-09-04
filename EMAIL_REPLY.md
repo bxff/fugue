@@ -1,5 +1,9 @@
 # Reply to Matthew — Phantom Barriers & New Observations
 
+> **Historical unsent draft.** This describes the abandoned RO-shifting and
+> chain-hopper experiment. It is retained only as research provenance and must
+> not be read as the current solution; see `SOLUTION.md` for the audited status.
+
 ---
 
 **Subject:** Re: Observations on Maximal Non-Interleaving in Fugue

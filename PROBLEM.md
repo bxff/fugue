@@ -1,15 +1,14 @@
 # Phantom Barriers in FugueMax: Problem Statement
 
-> **NOTE (2026-08-16): this document is the historical problem statement and
+> **NOTE (2026-09-03): this document is the historical problem statement and
 > is partially stale.** It describes the old 3-part fix (RO shifting,
 > `replacementRightOrigin`, chain-hopper) as "the current implementation" —
-> that machinery was removed and replaced. The complete, authoritative
-> solution is in [`SOLUTION.md`](SOLUTION.md): canonical payloads with
-> delivery-time era derivation from the op graph, era-first sibling
-> ordering, and the complete list of guarantees and deliberate overrides.
+> that machinery was removed and replaced.
 > Problem 1 and Problem 2 below remain accurate descriptions of the
 > *phenomena*; the "What happens" paragraphs reflect the state of the old
-> fix and no longer describe the code.
+> fix and no longer describe the code. [`SOLUTION.md`](SOLUTION.md) records
+> both the projected-gap experiment and its known transport-handoff failure;
+> it is not a completed correction.
 
 ## Background
 

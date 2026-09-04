@@ -6,6 +6,10 @@
     "type": "module",
     "scripts": {
         "diagrams:tombstones": "node generate_tombstone_diagrams.js",
+        "fuzz:tombstones": "node fuzz_tombstone_properties.js --module fugue-max-canonical --profile published-bugs --mode report",
+        "fuzz:tombstones:controls": "node fuzz_tombstone_properties.js --module fugue-max-canonical --profile controls --mode report",
+        "fuzz:tombstones:check": "node fuzz_tombstone_properties.js --module fugue-max-simple --profile required --mode check",
+        "test:tombstone-fuzzer": "node test_tombstone_fuzzer.js",
         "test:tombstones": "node test_tombstone_invariance.js",
         "test:tombstones:report": "node test_tombstone_invariance.js --report-only"
     },

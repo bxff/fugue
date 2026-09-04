@@ -35,30 +35,6 @@ interface Node<T> {
    * unset = we're not a right-side child.
    */
   rightOrigin?: Node<T> | null;
-  /**
-   * True if this node's anchor (the node it was inserted directly after,
-   * including tombstones) was already deleted at generation time.
-   * Pre-deletion siblings order before post-deletion siblings, so content
-   * written with knowledge of a deletion lands after content that was
-   * anchored while the deleted node was still alive.
-   *
-   * DERIVED AT DELIVERY in this variant (era-recv): computed from the
-   * op's causal context, not shipped in the op.
-   */
-  afterTombstone: boolean;
-  /**
-   * Causal dot of the insert transaction that created this node:
-   * (id.sender, insertDot). Used at delivery to decide whether another
-   * op's generator knew this node.
-   */
-  insertDot: number;
-  /**
-   * Causal dots of the delete transactions for this node
-   * (possibly several, if deleted concurrently by multiple replicas).
-   * Used at delivery to decide whether another op's generator knew
-   * this node was deleted.
-   */
-  deleters: { sender: string; counter: number }[];
 }
 
 interface InsertMessage<T> {
@@ -82,9 +58,30 @@ interface NodeSave<T> {
   side: "L" | "R";
   size: number;
   rightOrigin?: ID | null;
-  afterTombstone?: boolean;
-  insertDot?: number;
-  deleters?: { sender: string; counter: number }[];
+}
+
+interface LocalPublicationStateSave {
+  version: 1;
+  replicaID: string;
+  treeFingerprint: string;
+  nextSequence: number;
+  publishedThrough: number;
+  pendingInserts: [ID, number][];
+  pendingDeletes: [ID, number][];
+}
+
+function fingerprint(bytes: Uint8Array): string {
+  // Two independent 32-bit FNV-style streams. This is a torn-checkpoint
+  // detector, not a cryptographic authentication mechanism.
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (const byte of bytes) {
+    first = Math.imul(first ^ byte, 0x01000193) >>> 0;
+    second = Math.imul(second ^ byte, 0x85ebca6b) >>> 0;
+  }
+  return `${bytes.length}:${first.toString(16).padStart(8, "0")}:${second
+    .toString(16)
+    .padStart(8, "0")}`;
 }
 
 class Tree<T> {
@@ -106,9 +103,6 @@ class Tree<T> {
       leftChildren: [],
       rightChildren: [],
       size: 0,
-      afterTombstone: false,
-      insertDot: 0,
-      deleters: [],
     };
     this.nodesByID.set("", [this.root]);
   }
@@ -118,10 +112,8 @@ class Tree<T> {
     value: T,
     parent: Node<T>,
     side: "L" | "R",
-    rightOriginID?: ID | null,
-    afterTombstone = false,
-    insertDot = 0
-  ) {
+    rightOriginID?: ID | null
+  ): Node<T> {
     const node: Node<T> = {
       id,
       value,
@@ -131,9 +123,6 @@ class Tree<T> {
       leftChildren: [],
       rightChildren: [],
       size: 0,
-      afterTombstone,
-      insertDot,
-      deleters: [],
     };
     if (rightOriginID !== undefined) {
       // Store the rightOrigin as sent, even if it is (or later becomes) a
@@ -156,6 +145,7 @@ class Tree<T> {
     this.insertIntoSiblings(node);
 
     this.updateSize(node, 1);
+    return node;
   }
 
   private insertIntoSiblings(node: Node<T>) {
@@ -163,23 +153,16 @@ class Tree<T> {
     const parent = node.parent!;
     if (node.side === "R") {
       const rightSibs = parent.rightChildren;
-      // Siblings are in order: era FIRST (pre-deletion anchors before
-      // post-deletion anchors), then *reverse* order of their
-      // rightOrigins, then the lexicographic order on id.sender.
-      // Era-first is required: a post-era sibling's rightOrigin can lie
-      // beyond a pre-era sibling's rightOrigin (concurrent insert inside
-      // the dead gap), and the era principle must dominate reverse-RO.
+      // Published FugueMax ordering: reverse right-origin order, followed
+      // by the immutable operation ID. Deletion knowledge never overrides
+      // this structural ordering.
       let i = 0;
       for (; i < rightSibs.length; i++) {
         if (
           !(
-            node.afterTombstone !== rightSibs[i].afterTombstone
-              ? node.afterTombstone
-              : this.isLess(node.rightOrigin!, rightSibs[i].rightOrigin!) ||
-                (node.rightOrigin === rightSibs[i].rightOrigin &&
-                  (node.id.sender > rightSibs[i].id.sender ||
-                    (node.id.sender === rightSibs[i].id.sender &&
-                      node.id.counter > rightSibs[i].id.counter)))
+            this.isLess(node.rightOrigin!, rightSibs[i].rightOrigin!) ||
+            (node.rightOrigin === rightSibs[i].rightOrigin &&
+              node.id.sender > rightSibs[i].id.sender)
           )
         )
           break;
@@ -187,16 +170,11 @@ class Tree<T> {
       rightSibs.splice(i, 0, node);
     } else {
       const leftSibs = parent.leftChildren;
-      // Siblings are ordered by era (pre-deletion anchors first), then in
-      // lexicographic order by id.sender.
+      // Published FugueMax ordering for left siblings: immutable ID.
       let i = 0;
       for (; i < leftSibs.length; i++) {
         if (
-          !(node.afterTombstone !== leftSibs[i].afterTombstone
-            ? node.afterTombstone
-            : node.id.sender > leftSibs[i].id.sender ||
-              (node.id.sender === leftSibs[i].id.sender &&
-                node.id.counter > leftSibs[i].id.counter))
+          !(node.id.sender > leftSibs[i].id.sender)
         )
           break;
       }
@@ -446,13 +424,14 @@ class Tree<T> {
           nodeSave.rightOrigin =
             node.rightOrigin === null ? null : node.rightOrigin.id;
         }
-        if (node.afterTombstone) nodeSave.afterTombstone = true;
-        nodeSave.insertDot = node.insertDot;
-        nodeSave.deleters = node.deleters;
         return nodeSave;
       });
     }
     return new Uint8Array(Buffer.from(JSON.stringify(save)));
+  }
+
+  fingerprint(): string {
+    return fingerprint(this.save());
   }
 
   load(saveData: Uint8Array) {
@@ -478,9 +457,6 @@ class Tree<T> {
           size: nodeSave.size,
           leftChildren: [],
           rightChildren: [],
-          afterTombstone: nodeSave.afterTombstone === true,
-          insertDot: nodeSave.insertDot ?? 0,
-          deleters: nodeSave.deleters ?? [],
         }))
       );
     }
@@ -549,6 +525,15 @@ class Tree<T> {
 export class FugueMaxSimple<T> extends CPrimitive {
   private counter = 0;
   private tree: Tree<T>;
+  /**
+   * Local-only outbox state. Each locally generated primitive gets a
+   * monotonically increasing publication sequence. See
+   * captureLocalPublicationFrontier() and markLocalUpdatesSent().
+   */
+  private nextLocalPublicationSequence = 1;
+  private publishedThrough = 0;
+  private readonly localInsertPublication = new Map<Node<T>, number>();
+  private readonly localDeletePublication = new Map<Node<T>, number>();
 
   constructor(init: InitToken) {
     super(init);
@@ -563,11 +548,15 @@ export class FugueMaxSimple<T> extends CPrimitive {
   }
 
   private insertOne(index: number, value: T) {
-    // insert generator. Payload is CANONICAL FugueMax (tombstone-inclusive
-    // origins) — identical whether or not this replica has synced the
-    // deletions of nodes in the visible gap. Era information is NOT in the
-    // payload; receivers derive it from the op's causal context (vector
-    // clock) at delivery time.
+    // EXPERIMENTAL: Insert into the author's projected tree. A remotely deleted node is
+    // transparent: merely learning an already-dead node must not change the
+    // generated position. A previously published node with a pending local
+    // deletion remains a gap boundary, so "insert before B; delete B" and
+    // "delete B; insert in B's former gap" generate the same placement.
+    //
+    // The mutable input is the explicit local outbox epoch. This is a known
+    // semantic defect, not a final contract: N7 shows that handing a delete to
+    // transport before the following insert changes the emitted operation.
     const id = { sender: this.runtime.replicaID, counter: this.counter };
     this.counter++;
     const leftOrigin =
@@ -575,52 +564,193 @@ export class FugueMaxSimple<T> extends CPrimitive {
         ? this.tree.root
         : this.tree.getByIndex(this.tree.root, index - 1);
 
+    const isUnpublished = (sequence: number | undefined) =>
+      sequence !== undefined && sequence > this.publishedThrough;
+    const isProjectedNode = (node: Node<T>) =>
+      !node.isDeleted ||
+      // A pending local delete of previously published content remembers the
+      // former gap for replacement typing (N7). If the insertion itself is
+      // still pending, insert+delete is a cancellable local ghost instead.
+      (isUnpublished(this.localDeletePublication.get(node)) &&
+        !isUnpublished(this.localInsertPublication.get(node)));
+
+    // Find the next node after leftOrigin in the projected traversal. Skipped
+    // tombstones are not erased from the replicated tree; they are ignored
+    // only while generating this new immutable insertion.
+    let projectedNext = this.tree.nextInTraversal(leftOrigin);
+    while (projectedNext !== null && !isProjectedNode(projectedNext)) {
+      projectedNext = this.tree.nextInTraversal(projectedNext);
+    }
+
     let msg: InsertMessage<T>;
-    let canonicalNext: Node<T> | null;
-    if (leftOrigin.rightChildren.length === 0) {
-      // The new node becomes a right child of leftOrigin.
-      canonicalNext = this.tree.nextNonDescendant(leftOrigin);
+    if (
+      projectedNext === null ||
+      !this.tree.isDescendant(projectedNext, leftOrigin)
+    ) {
+      // No projected right descendant: use the normal right-child encoding,
+      // with the next projected node as the stable right-origin bucket.
       msg = {
         type: "insert",
         id,
         value,
         parent: leftOrigin.id,
         side: "R",
-        rightOrigin: canonicalNext === null ? null : canonicalNext.id,
+        rightOrigin: projectedNext === null ? null : projectedNext.id,
       };
     } else {
-      // The new node becomes a left child of the tombstone-inclusive next
-      // node (its right origin).
-      canonicalNext = this.tree.leftmostDescendant(
-        leftOrigin.rightChildren[0]
-      );
-      msg = { type: "insert", id, value, parent: canonicalNext.id, side: "L" };
-    }
-
-    // Request vector clock entries the receiver's era walk will need:
-    // for each known tombstone crossed by the generator's local walk, the
-    // entries of its deleters; and the entry of the generator's alive next
-    // (the stop node's insert dot). Unrequested entries read 0 at the
-    // receiver, which correctly makes concurrent nodes "skip" during the
-    // walk.
-    const vectorClockKeys: string[] = [];
-    let current = canonicalNext;
-    while (current !== null) {
-      if (current.isDeleted) {
-        for (const d of current.deleters) vectorClockKeys.push(d.sender);
-        current = this.tree.nextInTraversal(current);
-      } else {
-        vectorClockKeys.push(current.id.sender);
-        break;
-      }
+      // The projected successor lies in leftOrigin's first surviving right
+      // subtree. Insert immediately before it, as a left child.
+      msg = {
+        type: "insert",
+        id,
+        value,
+        parent: projectedNext.id,
+        side: "L",
+      };
     }
 
     // Message is delivered to receivePrimitive ("on delivering" function).
-    super.sendPrimitive(JSON.stringify(msg), { vectorClockKeys } as any);
+    super.sendPrimitive(JSON.stringify(msg));
   }
 
   delete(startIndex: number, count = 1): void {
     for (let i = 0; i < count; i++) this.deleteOne(startIndex);
+  }
+
+  /**
+   * Returns a watermark covering exactly the local primitives generated so
+   * far. Capture this value when constructing an outgoing batch, then pass it
+   * to markLocalUpdatesSent after that batch is handed to the sync layer.
+   */
+  captureLocalPublicationFrontier(): number {
+    return this.nextLocalPublicationSequence - 1;
+  }
+
+  /**
+   * Marks a prefix of local operations as handed to the sync layer.
+   *
+   * With no argument this publishes every local operation generated so far,
+   * preserving the original flush-all convenience API. A captured frontier
+   * is safer for asynchronous or partially flushed outboxes: operations made
+   * after the batch was captured remain pending.
+   *
+   * Fugue cannot infer this boundary: delivery acknowledgements and network
+   * buffering live outside the CRDT. This experimental implementation uses
+   * the boundary anyway; the generalized N7 test documents why that is not a
+   * valid final source of document semantics.
+   */
+  markLocalUpdatesSent(
+    through: number = this.captureLocalPublicationFrontier()
+  ): void {
+    const current = this.captureLocalPublicationFrontier();
+    if (
+      !Number.isSafeInteger(through) ||
+      through < 0 ||
+      through > current
+    ) {
+      throw new Error(
+        `Invalid publication frontier ${through}; expected 0..${current}`
+      );
+    }
+    // A later prefix may be acknowledged before an older callback runs.
+    // Re-acknowledging the covered prefix is an idempotent no-op.
+    if (through <= this.publishedThrough) return;
+    this.publishedThrough = through;
+
+    // Published entries no longer affect insertion projection. Discarding
+    // them also bounds this local-only bookkeeping by the unsent outbox.
+    for (const [node, sequence] of this.localInsertPublication) {
+      if (sequence <= through) this.localInsertPublication.delete(node);
+    }
+    for (const [node, sequence] of this.localDeletePublication) {
+      if (sequence <= through) this.localDeletePublication.delete(node);
+    }
+  }
+
+  /**
+   * Saves the device-local publication frontier for a durable outbox.
+   * This byte string must stay local to the device; unlike savePrimitive(),
+   * it is not replicated document state.
+   */
+  saveLocalPublicationState(): Uint8Array {
+    const save: LocalPublicationStateSave = {
+      version: 1,
+      replicaID: this.runtime.replicaID,
+      treeFingerprint: this.tree.fingerprint(),
+      nextSequence: this.nextLocalPublicationSequence,
+      publishedThrough: this.publishedThrough,
+      pendingInserts: [...this.localInsertPublication].map(
+        ([node, sequence]) => [node.id, sequence]
+      ),
+      pendingDeletes: [...this.localDeletePublication].map(
+        ([node, sequence]) => [node.id, sequence]
+      ),
+    };
+    return new Uint8Array(Buffer.from(JSON.stringify(save)));
+  }
+
+  /**
+   * Restores publication state after the replicated CRDT snapshot has been
+   * loaded. The transport must restore its matching outgoing batches and
+   * captured watermarks at the same time.
+   */
+  loadLocalPublicationState(savedState: Uint8Array): void {
+    const save: LocalPublicationStateSave = JSON.parse(
+      Buffer.from(savedState).toString()
+    );
+    if (
+      save.version !== 1 ||
+      typeof save.replicaID !== "string" ||
+      save.replicaID === this.runtime.replicaID ||
+      typeof save.treeFingerprint !== "string" ||
+      !Number.isSafeInteger(save.nextSequence) ||
+      save.nextSequence < 1 ||
+      !Number.isSafeInteger(save.publishedThrough) ||
+      save.publishedThrough < 0 ||
+      save.publishedThrough >= save.nextSequence ||
+      !Array.isArray(save.pendingInserts) ||
+      !Array.isArray(save.pendingDeletes)
+    ) {
+      throw new Error(
+        save.replicaID === this.runtime.replicaID
+          ? "Restoring Fugue local state requires a fresh replica ID"
+          : "Invalid local publication state"
+      );
+    }
+    if (save.treeFingerprint !== this.tree.fingerprint()) {
+      throw new Error(
+        "Local publication state does not match the loaded Fugue snapshot"
+      );
+    }
+
+    const resolve = (entries: [ID, number][]): [Node<T>, number][] =>
+      entries.map(([id, sequence]) => {
+        if (
+          id === null ||
+          typeof id !== "object" ||
+          typeof id.sender !== "string" ||
+          !Number.isSafeInteger(id.counter) ||
+          !Number.isSafeInteger(sequence) ||
+          sequence <= save.publishedThrough ||
+          sequence >= save.nextSequence
+        ) {
+          throw new Error("Invalid pending publication entry");
+        }
+        return [this.tree.getByID(id), sequence];
+      });
+
+    const inserts = resolve(save.pendingInserts);
+    const deletes = resolve(save.pendingDeletes);
+    this.nextLocalPublicationSequence = save.nextSequence;
+    this.publishedThrough = save.publishedThrough;
+    this.localInsertPublication.clear();
+    this.localDeletePublication.clear();
+    for (const [node, sequence] of inserts) {
+      this.localInsertPublication.set(node, sequence);
+    }
+    for (const [node, sequence] of deletes) {
+      this.localDeletePublication.set(node, sequence);
+    }
   }
 
   private deleteOne(index: number): void {
@@ -638,83 +768,19 @@ export class FugueMaxSimple<T> extends CPrimitive {
     const msg: InsertMessage<T> | DeleteMessage = JSON.parse(<string>message);
     switch (msg.type) {
       case "insert": {
-        const runtimeMeta = meta.runtimeExtra as {
-          senderCounter: number;
-          vectorClock: { get(replicaID: string): number };
-        };
-        // This insert's causal dot (transaction counter). Accessed during
-        // the local echo too, which is what makes the runtime transmit it
-        // to remote replicas.
-        const insertDot = runtimeMeta.senderCounter;
-        const vc = (sender: string) =>
-          runtimeMeta.vectorClock === undefined
-            ? 0
-            : runtimeMeta.vectorClock.get(sender);
-
-        // Era walk: reconstruct the generator's view from the op graph.
-        // Start at the canonical (tombstone-inclusive) next node.
-        let current: Node<T> | null =
-          msg.side === "R"
-            ? msg.rightOrigin === null || msg.rightOrigin === undefined
-              ? null
-              : this.tree.getByID(msg.rightOrigin)
-            : this.tree.getByID(msg.parent);
-        let anchor: Node<T> | null = null; // last crossed tombstone
-        while (current !== null) {
-          if (
-            current.isDeleted &&
-            current.deleters.some((d) => vc(d.sender) >= d.counter)
-          ) {
-            // Tombstone whose deletion the generator knew: cross it.
-            anchor = current;
-            current = this.tree.nextInTraversal(current);
-          } else if (vc(current.id.sender) >= current.insertDot) {
-            // The generator's alive next: stop here.
-            break;
-          } else {
-            // Concurrent node the generator never saw: skip it.
-            current = this.tree.nextInTraversal(current);
-          }
-        }
-
-        let parent: Node<T>;
-        let side: "L" | "R";
-        let rightOriginID: ID | null | undefined;
-        let afterTombstone: boolean;
-        if (anchor === null) {
-          // No known tombstone crossed: keep the canonical placement.
-          parent = this.tree.getByID(msg.parent);
-          side = msg.side;
-          rightOriginID = msg.side === "R" ? msg.rightOrigin : undefined;
-          afterTombstone = false;
-        } else if (current !== null && this.tree.isDescendant(current, anchor)) {
-          // The anchor had right children in the generator's view, so the
-          // generator's next is the leftmost descendant of the anchor's
-          // first right child. Nest the new node as a left child of it,
-          // exactly as generation-time era anchoring does. (Ancestry of the
-          // stop node is fixed by the op's causal past, so this branch is
-          // delivery-order independent.)
-          parent = current;
-          side = "L";
-          rightOriginID = undefined;
-          afterTombstone = true;
-        } else {
-          // Re-anchor after the whole known-dead chain.
-          parent = anchor;
-          side = "R";
-          rightOriginID = current === null ? null : current.id;
-          afterTombstone = true;
-        }
-
-        this.tree.addNode(
+        const node = this.tree.addNode(
           msg.id,
           msg.value,
-          parent,
-          side,
-          rightOriginID,
-          afterTombstone,
-          insertDot
+          this.tree.getByID(msg.parent),
+          msg.side,
+          msg.rightOrigin
         );
+        if (meta.isLocalOp) {
+          this.localInsertPublication.set(
+            node,
+            this.nextLocalPublicationSequence++
+          );
+        }
         // In a production implementation, we would emit an Insert event here.
         break;
       }
@@ -723,13 +789,12 @@ export class FugueMaxSimple<T> extends CPrimitive {
         // in the tree at the same position and remains a valid ordering
         // anchor for any node whose rightOrigin references it.
         const node = this.tree.getByID(msg.id);
-        // Record this delete's causal dot so later inserts' era walks can
-        // tell whether their generator knew about it.
-        const runtimeMeta = meta.runtimeExtra as { senderCounter: number };
-        node.deleters.push({
-          sender: meta.senderID,
-          counter: runtimeMeta.senderCounter,
-        });
+        if (meta.isLocalOp) {
+          this.localDeletePublication.set(
+            node,
+            this.nextLocalPublicationSequence++
+          );
+        }
         if (!node.isDeleted) {
           node.value = null;
           node.isDeleted = true;

@@ -81,7 +81,9 @@ class FugueMaxSimpleCRDT {
     });
     if (updateHandler) {
       this.doc.on("Send", (e) => {
+        const frontier = this.carray?.captureLocalPublicationFrontier();
         updateHandler(this._encodeUpdate(e.message, false));
+        this.carray?.markLocalUpdatesSent(frontier);
       });
     }
     this.carray = this.doc.registerCollab("array", (init) => new FugueMaxSimple(init));
@@ -1062,16 +1064,9 @@ async function runDeletionConvergence(name, factory) {
 
   console.log(`  Without seeing B̶: "${result1}"`);
   console.log(`  After seeing B̶:   "${result2}"`);
-  // NOTE: these two scenarios contain *different* insert operations for Y:
-  // in scenario 2, Y was generated knowing B was deleted, so it anchors
-  // after B's tombstone (post-deletion era). Requiring result1 === result2
-  // would force the algorithm to erase deletion-awareness from Y's
-  // operation — which is exactly what makes pre-era vs post-era ordering
-  // nondeterministic (the AYC problem). So instead we require that each
-  // scenario's op set converges, and that Y lands inside (A, C) in both.
-  const ok1 = result1.startsWith("A") && result1.indexOf("Y") < result1.indexOf("C");
-  const ok2 = result2.startsWith("A") && result2.indexOf("Y") < result2.indexOf("C");
-  assertEq(ok1 && ok2, true, `${name} DeletionConvergence (Y within (A,C) in both knowledge states)`);
+  // This is the original phantom-barrier requirement: receiving B only after
+  // it is already deleted must not manufacture another visible ordering.
+  assertEq(result2, result1, `${name} DeletionConvergence ghost-history neutrality`);
 }
 
 // ---------------------------------------------------------

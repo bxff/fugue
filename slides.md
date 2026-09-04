@@ -5,6 +5,11 @@ class: invert
 paginate: true
 ---
 
+> **Historical presentation draft.** The later Fugue-Era/RO-shifting proposals
+> discussed in these slides are rejected research paths, not the current
+> algorithm or a completed fix. See `SOLUTION.md` and the executable tombstone
+> matrix for current status.
+
 ## Part 1: The Paper's Core Concepts
 
 ### The Interleaving Problem
